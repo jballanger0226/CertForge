@@ -49,10 +49,15 @@ jobs:
             requirements-dev.txt
       - run: pip install -r requirements.txt -r requirements-dev.txt
       - name: Engine, name-detection and service tests (CA checked against the OpenSSL command line)
-        run: python -m unittest tests.test_ca tests.test_netinfo tests.test_service tests.test_acme -v
+        run: python -m unittest tests.test_ca tests.test_netinfo tests.test_service tests.test_acme tests.test_acmeca -v
       - name: End-to-end tests (real server on ports 443 and 80)
         # Ports below 1024 need root; run the same interpreter with the same packages.
-        run: sudo -E "$(which python)" -m unittest tests.test_e2e -v
+        run: sudo -E "$(which python)" -m unittest tests.test_e2e -v 2>&1 | tee /tmp/e2e.log
+      - name: End-to-end failures (shown as an annotation, since job logs may be unavailable)
+        if: failure()
+        run: |
+          grep -E -A12 "^(FAIL|ERROR):" /tmp/e2e.log | cut -c1-300 | tail -c 9000 | gzip -9 | base64 -w0 | fold -w 3500 \
+            | awk '{ printf "::error title=e2e part %d::%s\n", NR, $0 }'
 
   dependencies:
     name: Dependency audit
