@@ -46,7 +46,9 @@ for _ in $(seq 1 60); do
 done
 if [ -z "$ok" ]; then
   kill "$PID" 2>/dev/null || true; sleep 3
-  j=$(journalctl -D "$R/var/log/journal" --no-pager -o cat -n 60 2>&1 | tr '\n' '|')
-  fail "CertForge didn't answer on 443 within 2 minutes. Console: $(tail_log "$W/boot.log") Journal: $j"
+  # Compressed and base64'd so it survives as one annotation line: echo <text> | base64 -d | gunzip
+  j=$( { echo "== console"; tail -n 60 "$W/boot.log" | sed 's/\x1b\[[0-9;]*m//g'; echo "== journal"; journalctl -D "$R/var/log/journal" --no-pager -o short-monotonic -n 150 2>&1; } | gzip -9 | base64 -w0)
+  echo "::notice title=boot-diagnostics::$j"
+  fail "CertForge didn't answer on 443 within 2 minutes (diagnostics are in the boot-diagnostics annotation)"
 fi
 echo "boot OK: https://127.0.0.1/healthz answered"
