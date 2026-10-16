@@ -38,7 +38,7 @@ jobs:
         run: sudo deploy/ct/build-template.sh "${{ steps.v.outputs.version }}" dist "${{ inputs.debian_suite || 'trixie' }}"
       - name: Verify (structure, then boot it and ask for /healthz)
         run: sudo deploy/ct/verify-template.sh dist/certforge_${{ steps.v.outputs.version }}_amd64.tar.zst
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: certforge-proxmox-template
           path: dist/*
