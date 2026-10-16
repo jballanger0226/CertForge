@@ -157,4 +157,9 @@ jobs:
         run: |
           docker logs cf > /tmp/diag/certforge.log 2>&1 || true
           sudo tail -n 80 /var/log/letsencrypt/letsencrypt.log > /tmp/diag/letsencrypt.log 2>/dev/null || true
-          echo "::error title=acme-diagnostics::$(tar -C /tmp/diag -cf - . | gzip -9 | base64 -w0)"
+          # annotations are capped near 4 KB, so send each file's tail separately, compressed and chunked
+          cd /tmp/diag
+          for f in *; do
+            [ -f "$f" ] || continue
+            tail -c 5000 "$f" | gzip -9 | base64 -w0 | fold -w 3500 | awk -v f="$f" '{ printf "::error title=diag %s part %d::%s\n", f, NR, $0 }'
+          done
