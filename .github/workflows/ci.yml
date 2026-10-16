@@ -146,7 +146,7 @@ jobs:
       - name: lego gets a certificate
         run: |
           docker run --rm --network host --add-host certforge.test:127.0.0.1 --add-host app.certforge.test:127.0.0.1 \
-            -e LEGO_CA_CERTIFICATES=/data/root.crt -v "$PWD":/data goacme/lego:latest \
+            -e LEGO_CA_CERTIFICATES=/data/root.crt -v "$PWD":/data goacme/lego:v4.21.0 \
             --server https://certforge.test/acme/directory --accept-tos --email ci@certforge.test \
             --http --http.port :80 --path /data/lego -d app.certforge.test run 2>&1 | tee /tmp/diag/lego.txt
           sudo chown -R "$USER" lego
