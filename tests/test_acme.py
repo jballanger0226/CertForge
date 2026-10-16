@@ -111,7 +111,12 @@ class Base(unittest.TestCase):
         for authz_url in order["authorizations"]:
             z = c.poll(authz_url).json()
             self.assertEqual(z["challenges"][0]["type"], "http-01")
-            self.assertEqual(c.poke(z["challenges"][0]["url"]).status, 200)
+            poked = c.poke(z["challenges"][0]["url"])
+            self.assertEqual(poked.status, 200)
+            # RFC 8555 7.5.1: certbot and others refuse a challenge response without the "up" link, and it must sit
+            # alongside the directory link every response carries
+            self.assertIn(f'<{authz_url}>;rel="up"', poked.headers["link"])
+            self.assertIn('rel="index"', poked.headers["link"])
         return self.wait(c, order_url, ("ready", "invalid"))
 
     def get_cert(self, c: Client, names: list[str], key=None):

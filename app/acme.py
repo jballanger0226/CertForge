@@ -331,7 +331,8 @@ class Acme:
             reply = Reply(e.status, json.dumps(e.problem()).encode(), {"Content-Type": "application/problem+json"})
         reply.headers["Replay-Nonce"] = self.nonces.new()
         reply.headers["Cache-Control"] = "no-store"
-        reply.headers["Link"] = f'<{base}/acme/directory>;rel="index"'
+        index = f'<{base}/acme/directory>;rel="index"'
+        reply.headers["Link"] = f'{reply.headers["Link"]}, {index}' if "Link" in reply.headers else index    # keep e.g. rel="up"
         return reply
 
     def _dispatch(self, kind, method, base, url, body, content_type, ident, remote) -> Reply:
