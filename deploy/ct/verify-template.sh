@@ -15,7 +15,9 @@ mkdir "$W/rootfs"
 zstd -dc "$T" | tar --numeric-owner -C "$W/rootfs" -xf -
 R="$W/rootfs"
 
-fail() { echo "FAIL: $*" >&2; exit 1; }
+# Also written as a GitHub annotation, so the reason shows on the run page without opening the log.
+fail() { echo "FAIL: $*" >&2; echo "::error title=Template check failed::${*//$'\n'/%0A}"; exit 1; }
+tail_log() { tail -n 40 "$1" | sed 's/\r//' | awk 'BEGIN{ORS="%0A"}{print}'; }
 grep -q '^ID=debian' "$R/etc/os-release"          || fail "no Debian /etc/os-release"
 [ -x "$R/sbin/init" ] || [ -x "$R/usr/lib/systemd/systemd" ] || fail "no init"
 [ -x "$R/opt/certforge/venv/bin/python" ]          || fail "venv missing"
@@ -24,7 +26,8 @@ grep -q '^ID=debian' "$R/etc/os-release"          || fail "no Debian /etc/os-rel
 [ -z "$(ls -A "$R/var/lib/certforge")" ]           || fail "data directory is not empty (would leak a CA into every clone)"
 [ ! -s "$R/etc/machine-id" ]                       || fail "machine-id baked in"
 ls "$R"/etc/ssh/ssh_host_* >/dev/null 2>&1         && fail "SSH host keys baked in"
-[ "$(stat -c %U:%a "$R/var/lib/certforge")" = "certforge:700" ] || fail "data dir owner/mode"
+uid=$(awk -F: '$1=="certforge"{print $3}' "$R/etc/passwd")      # host can't map the container's uids to names
+[ "$(stat -c %u:%a "$R/var/lib/certforge")" = "$uid:700" ] || fail "data dir owner/mode: $(stat -c %u:%a "$R/var/lib/certforge") (certforge is uid $uid)"
 echo "structure OK"
 
 # Boot it. nspawn shares the runner's network, so the service answers on the runner's port 443.
@@ -34,8 +37,8 @@ PID=$!
 ok=""
 for _ in $(seq 1 60); do
   if curl -ks --max-time 3 https://127.0.0.1/healthz 2>/dev/null | grep -qx ok; then ok=1; break; fi
-  kill -0 "$PID" 2>/dev/null || { cat "$W/boot.log"; fail "container exited"; }
+  kill -0 "$PID" 2>/dev/null || fail "container exited: $(tail_log "$W/boot.log")"
   sleep 2
 done
-[ -n "$ok" ] || { tail -50 "$W/boot.log"; fail "CertForge didn't answer on 443 within 2 minutes"; }
+[ -n "$ok" ] || fail "CertForge didn't answer on 443 within 2 minutes: $(tail_log "$W/boot.log")"
 echo "boot OK: https://127.0.0.1/healthz answered"
