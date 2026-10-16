@@ -1,0 +1,7 @@
+
+  CertForge: private certificate authority
+  Open  https://<this container's name or IP>/  in a browser to set it up.
+  Setup code:  certforge-code
+  Settings:    /etc/certforge.env   (see README.md)
+  Data:        /var/lib/certforge   (back this up)
+

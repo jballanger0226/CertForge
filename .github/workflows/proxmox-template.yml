@@ -1,0 +1,66 @@
+name: Proxmox CT template
+
+# Builds certforge_<version>_amd64.tar.zst, a Debian container template for Proxmox VE.
+#  - on pull requests that touch what goes into it: builds and boot-tests it
+#  - on version tags (v1.2.3): also attaches it to a GitHub release
+#  - on demand from the Actions tab
+on:
+  pull_request:
+    paths: [app/**, requirements.txt, deploy/ct/**, .github/workflows/proxmox-template.yml]
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      debian_suite:
+        description: Debian release to build on
+        default: trixie
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and boot-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version
+        id: v
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then v="${GITHUB_REF_NAME#v}"; else v="0.0.0-${GITHUB_SHA::7}"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - name: Tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq debootstrap zstd systemd-container
+      - name: Build template
+        run: sudo deploy/ct/build-template.sh "${{ steps.v.outputs.version }}" dist "${{ inputs.debian_suite || 'trixie' }}"
+      - name: Verify (structure, then boot it and ask for /healthz)
+        run: sudo deploy/ct/verify-template.sh dist/certforge_${{ steps.v.outputs.version }}_amd64.tar.zst
+      - uses: actions/upload-artifact@v4
+        with:
+          name: certforge-proxmox-template
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Attach to release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: certforge-proxmox-template
+          path: dist
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "CertForge $GITHUB_REF_NAME" \
+                 --notes "Proxmox container template: download the .tar.zst into /var/lib/vz/template/cache/ on your Proxmox host (or upload it in the web UI under local > CT Templates), then create a container from it. See the README."
+          gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber

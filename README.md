@@ -1,5 +1,7 @@
 # CertForge
 
+[![CI](https://github.com/jballanger0226/CertForge/actions/workflows/ci.yml/badge.svg)](https://github.com/jballanger0226/CertForge/actions/workflows/ci.yml)
+
 A small private certificate authority with a web page on port 443. Type a name, get a signed certificate. No OpenSSL command line.
 
 - Two-level chain: a root CA and an online intermediate CA that signs your certificates.
@@ -29,6 +31,16 @@ sudo ./deploy/install.sh certforge.lan,10.0.0.5
 ```
 
 This creates a `certforge` user, installs into `/opt/certforge`, keeps data in `/var/lib/certforge` (mode 700), and starts a hardened systemd unit that can bind 443 without running as root. The setup code is in `journalctl -u certforge`. To use it as a VM template, run the installer, stop the service and empty `/var/lib/certforge` before you snapshot, so every clone creates its own CA and setup code on first boot. Set each clone's names in `/etc/certforge.env`. Never snapshot a machine that has finished setup; the clones would share one CA.
+
+## Run it as a Proxmox container
+
+Each tagged release (`v*`) has a `certforge_<version>_amd64.tar.zst` Debian container template attached. Build the latest one yourself from the **Actions** tab (Proxmox CT template, then Run workflow) and download it from the run's artifacts.
+
+1. Put the file in `/var/lib/vz/template/cache/` on the Proxmox host, or upload it under *local > CT Templates*.
+2. Create a container from it (*Create CT > Template*). 1 core, 512 MB RAM and 2 GB disk are plenty. An unprivileged container is fine.
+3. Start it and open `https://<container IP or name>/`. Get the setup code from the console with `certforge-code`.
+
+Back up `/var/lib/certforge` inside the container (or use Proxmox backups). Settings live in `/etc/certforge.env`. The template is built on Debian 13, so you need a Proxmox VE release that supports it.
 
 ## Running it without a container or service manager
 
@@ -69,6 +81,10 @@ Back up the whole `CERTFORGE_DATA` folder (the `certforge-data` volume in Docker
 - Anyone who can sign in to the web page can issue certificates, so keep it on a network you trust and use a strong admin password. There is a single admin account.
 - Revocation only helps clients that check the CRL. Many browsers don't check private CAs' lists.
 - Certificates carry `http://<public address>/pki/...` pointers to the CA files and CRL. Set the public address on the CA page to the name clients actually use.
+
+## Checks that run on GitHub
+
+Every push and pull request runs: Python and shell lint, Dockerfile and compose validation, the engine and end-to-end tests, a dependency vulnerability audit, and a Docker build that starts the container with the same restrictions as `docker-compose.yml` and checks it is healthy, not running as root, and redirects port 80 to 443. Pull requests that touch the app or `deploy/ct/` also build the Proxmox template and boot it to confirm CertForge answers. Dependabot keeps pip, Docker and Actions versions current.
 
 ## Tests
 

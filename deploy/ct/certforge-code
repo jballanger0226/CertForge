@@ -1,0 +1,8 @@
+#!/bin/sh
+# Prints the one-time setup code, if CertForge hasn't been set up yet.
+code=$(journalctl -u certforge -o cat --no-pager 2>/dev/null | grep -A1 "enter this setup code" | tail -n1 | tr -d ' ')
+if [ -n "$code" ]; then
+  echo "Setup code: $code"
+else
+  echo "No setup code found. CertForge is probably already set up (or hasn't started yet: systemctl status certforge)."
+fi

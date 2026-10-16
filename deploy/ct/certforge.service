@@ -1,0 +1,30 @@
+# systemd unit used inside the Proxmox container template.
+# Slightly lighter than deploy/certforge.service: options that need privileges an unprivileged
+# LXC container may not have (PrivateDevices, ProtectKernel*, RestrictNamespaces) are left out.
+[Unit]
+Description=CertForge private certificate authority
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=certforge
+Group=certforge
+WorkingDirectory=/opt/certforge
+Environment=CERTFORGE_DATA=/var/lib/certforge
+EnvironmentFile=-/etc/certforge.env
+ExecStart=/opt/certforge/venv/bin/python -m app.server
+Restart=on-failure
+RestartSec=3
+
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/certforge
+ProtectHome=true
+PrivateTmp=true
+LockPersonality=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

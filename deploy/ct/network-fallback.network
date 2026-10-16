@@ -1,0 +1,6 @@
+# DHCP on eth0 unless Proxmox writes its own network config (which sorts earlier and wins).
+[Match]
+Name=eth0
+
+[Network]
+DHCP=yes
