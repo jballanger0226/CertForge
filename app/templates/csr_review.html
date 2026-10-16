@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Review request – {{ org }}{% endblock %}
+{% block content %}
+<h1>Review the request</h1>
+<p class="lede">Check the names before signing. CertForge uses only the names and the public key from the request. It decides everything else, such as what the certificate may be used for.</p>
+
+{% if error %}<p class="note error" role="alert">{{ error }}</p>{% endif %}
+{% if p.skipped %}
+  <p class="note warn">These names in the request can't go into a certificate and were left out: {{ p.skipped|join(', ') }}.</p>
+{% endif %}
+
+<dl class="facts">
+  <dt>Subject in the request</dt><dd class="hex">{{ p.subject }}</dd>
+  <dt>Public key</dt><dd>{{ p.key }}</dd>
+</dl>
+
+<form method="post" action="/issue/csr/{{ token }}" class="narrow" data-busy="Signing...">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <label for="names">Names the certificate will be valid for <small>One per line, or separated by commas. Add or remove names here if needed.</small></label>
+  <textarea id="names" name="names" required autocomplete="off" autocapitalize="none" spellcheck="false">{{ f.names }}</textarea>
+  <div class="grid2">
+    <div>
+      <label for="days">Valid for, in days <small>Up to {{ MAX_DAYS }}.</small></label>
+      <input id="days" name="days" type="number" min="1" max="{{ MAX_DAYS }}" value="{{ f.days }}" inputmode="numeric">
+    </div>
+    <div>
+      <label for="purpose">What it's for</label>
+      <select id="purpose" name="purpose">
+        {% for k, v in PURPOSES.items() %}<option value="{{ k }}"{% if f.purpose == k %} selected{% endif %}>{{ v }}</option>{% endfor %}
+      </select>
+    </div>
+  </div>
+  <div class="actions">
+    <button class="btn big" type="submit">Sign request</button>
+    <a href="/issue/csr">Start over</a>
+  </div>
+</form>
+{% endblock %}

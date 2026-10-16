@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% block title %}Trust {{ org }} – {{ org }}{% endblock %}
+{% block content %}
+<h1>Trust {{ org }} on this device</h1>
+<p class="lede">Install the root certificate once and this device will accept every certificate {{ org }} issues, with no more browser warnings.</p>
+
+<section>
+  <h2>Download</h2>
+  <div class="big-actions">
+    <a class="btn big" href="/pki/root.crt">Download root certificate</a>
+  </div>
+  <p class="small">Most people only need that one button. The others are for specific systems.</p>
+  <ul class="links">
+    <li><a href="/pki/root.cer">Root, binary (.cer)</a> <span class="small">Windows and Java</span></li>
+    <li><a href="/pki/root.mobileconfig">Apple profile (.mobileconfig)</a> <span class="small">iPhone, iPad and Mac</span></li>
+    <li><a href="/pki/intermediate.crt">Intermediate (.crt)</a> <span class="small">only if a server isn't sending its chain</span></li>
+    <li><a href="/pki/chain.pem">Root and intermediate together (.pem)</a></li>
+    <li><a href="/pki/chain.p7b">Root and intermediate together (.p7b)</a> <span class="small">Windows</span></li>
+  </ul>
+</section>
+
+<section>
+  <h2>Check the fingerprint</h2>
+  <p>Before you install it, compare this fingerprint with the one your administrator gave you. If they differ, don't install the certificate.</p>
+  <p class="hex" id="fp">{% for line in ca.root.sha256|fp_lines %}{{ line }}<br>{% endfor %}</p>
+  <p class="small">SHA-256 fingerprint of {{ ca.root.subject }}, valid until {{ ca.root.not_after|date }}.</p>
+</section>
+
+<section>
+  <h2>Install it</h2>
+  <p>Pick your system. Browsers on Windows, macOS and ChromeOS use the system's trust list. Firefox keeps its own.</p>
+
+  <details class="os" data-os="windows">
+    <summary>Windows</summary>
+    <ol>
+      <li>Open the downloaded <strong>{{ slug }}-root-ca.cer</strong> file and choose <strong>Install Certificate</strong>.</li>
+      <li>Select <strong>Local Machine</strong>, then <strong>Place all certificates in the following store</strong>, then <strong>Trusted Root Certification Authorities</strong>.</li>
+      <li>Finish, and restart your browser.</li>
+    </ol>
+    <p>Or, in an administrator PowerShell window:</p>
+    <div class="cmdrow"><pre class="cmd" id="c-win">Import-Certificate -FilePath "$env:USERPROFILE\Downloads\{{ slug }}-root-ca.cer" -CertStoreLocation Cert:\LocalMachine\Root</pre><button type="button" class="btn quiet small" data-copy="#c-win">Copy</button></div>
+  </details>
+
+  <details class="os" data-os="mac">
+    <summary>macOS</summary>
+    <ol>
+      <li>Open the downloaded <strong>{{ slug }}-root-ca.crt</strong> file. Keychain Access opens. Add it to the <strong>System</strong> keychain.</li>
+      <li>Double-click the certificate, expand <strong>Trust</strong> and set <strong>When using this certificate</strong> to <strong>Always Trust</strong>.</li>
+    </ol>
+    <p>Or in Terminal:</p>
+    <div class="cmdrow"><pre class="cmd" id="c-mac">sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/Downloads/{{ slug }}-root-ca.crt</pre><button type="button" class="btn quiet small" data-copy="#c-mac">Copy</button></div>
+    <p>The <a href="/pki/root.mobileconfig">Apple profile</a> works on a Mac too.</p>
+  </details>
+
+  <details class="os" data-os="ios">
+    <summary>iPhone and iPad</summary>
+    <ol>
+      <li>Open this page in Safari and tap <a href="/pki/root.mobileconfig">Apple profile</a>. Allow the download.</li>
+      <li>Open <strong>Settings</strong>, tap <strong>Profile Downloaded</strong> near the top and choose <strong>Install</strong>.</li>
+      <li>Go to <strong>Settings, General, About, Certificate Trust Settings</strong> and switch on full trust for <strong>{{ ca.root.subject }}</strong>. Without this step the profile is installed but not trusted.</li>
+    </ol>
+  </details>
+
+  <details class="os" data-os="android">
+    <summary>Android</summary>
+    <ol>
+      <li>Download the <a href="/pki/root.crt">root certificate</a>.</li>
+      <li>Open <strong>Settings</strong>, search for <strong>CA certificate</strong> and choose <strong>Install a certificate, CA certificate</strong>. Menu names vary a little by phone.</li>
+      <li>Confirm the warning and pick the downloaded file.</li>
+    </ol>
+    <p class="small">Chrome and most system apps will trust it. Some apps ignore certificates you add yourself. That's an Android rule, not a problem with your CA.</p>
+  </details>
+
+  <details class="os" data-os="linux">
+    <summary>Linux</summary>
+    <p>Debian, Ubuntu and Raspberry Pi OS. This downloads the certificate, checks its fingerprint against the one above, and installs it only if they match:</p>
+    <div class="cmdrow"><pre class="cmd" id="c-deb">curl -fsSk https://{{ host }}/pki/root.crt -o /tmp/{{ slug }}-root-ca.crt &amp;&amp; \
+[ "$(openssl x509 -in /tmp/{{ slug }}-root-ca.crt -noout -fingerprint -sha256 | cut -d= -f2)" = "{{ ca.root.sha256 }}" ] &amp;&amp; \
+sudo cp /tmp/{{ slug }}-root-ca.crt /usr/local/share/ca-certificates/ &amp;&amp; sudo update-ca-certificates</pre><button type="button" class="btn quiet small" data-copy="#c-deb">Copy</button></div>
+    <p>Fedora, RHEL, Rocky and Alma, with the file already downloaded:</p>
+    <div class="cmdrow"><pre class="cmd" id="c-rpm">sudo cp {{ slug }}-root-ca.crt /etc/pki/ca-trust/source/anchors/ &amp;&amp; sudo update-ca-trust</pre><button type="button" class="btn quiet small" data-copy="#c-rpm">Copy</button></div>
+    <p>Chrome and Chromium on Linux keep their own list:</p>
+    <div class="cmdrow"><pre class="cmd" id="c-nss">certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n "{{ org }}" -i {{ slug }}-root-ca.crt</pre><button type="button" class="btn quiet small" data-copy="#c-nss">Copy</button></div>
+  </details>
+
+  <details class="os" data-os="firefox">
+    <summary>Firefox</summary>
+    <ol>
+      <li>Open <strong>Settings, Privacy &amp; Security</strong>, scroll to <strong>Certificates</strong> and choose <strong>View Certificates</strong>.</li>
+      <li>On the <strong>Authorities</strong> tab choose <strong>Import</strong> and pick the downloaded .crt file.</li>
+      <li>Tick <strong>Trust this CA to identify websites</strong>.</li>
+    </ol>
+    <p class="small">On Windows and macOS you can instead set <strong>security.enterprise_roots.enabled</strong> to true in <strong>about:config</strong>. Firefox then uses the system's trust list.</p>
+  </details>
+
+  <details class="os" data-os="tools">
+    <summary>Java, curl, Python, Node and Docker</summary>
+    <p>Java:</p>
+    <div class="cmdrow"><pre class="cmd" id="c-java">keytool -importcert -trustcacerts -alias {{ slug }} -file {{ slug }}-root-ca.crt -keystore "$JAVA_HOME/lib/security/cacerts" -storepass changeit</pre><button type="button" class="btn quiet small" data-copy="#c-java">Copy</button></div>
+    <p>Tools that take a CA file, without changing the system:</p>
+    <div class="cmdrow"><pre class="cmd" id="c-env">curl --cacert {{ slug }}-root-ca.crt https://nas.home.arpa
+export SSL_CERT_FILE=$PWD/{{ slug }}-root-ca.crt          # Python, Go, many others
+export REQUESTS_CA_BUNDLE=$PWD/{{ slug }}-root-ca.crt     # Python requests
+export NODE_EXTRA_CA_CERTS=$PWD/{{ slug }}-root-ca.crt    # Node.js</pre><button type="button" class="btn quiet small" data-copy="#c-env">Copy</button></div>
+  </details>
+</section>
+{% endblock %}

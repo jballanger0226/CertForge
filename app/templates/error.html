@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}{{ code }} – {{ org }}{% endblock %}
+{% block content %}
+<div class="center-page">
+  <h1>{{ 'Page not found' if code == 404 else 'That didn\'t work' }}</h1>
+  <p class="lede">{{ message }}</p>
+  <p class="actions"><a class="btn quiet" href="/">Back to the start</a></p>
+</div>
+{% endblock %}

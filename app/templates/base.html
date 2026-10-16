@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{% block title %}{{ org }}{% endblock %}</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <svg width="0" height="0" class="sr" aria-hidden="true" focusable="false">
+    <symbol id="mark" viewBox="0 0 120 120">
+      <g fill="none" stroke="currentColor" stroke-width="5">
+        <circle cx="60" cy="60" r="52"/>
+        <g stroke-width="3.5">
+          <ellipse cx="60" cy="32" rx="14" ry="26"/>
+          <ellipse cx="60" cy="32" rx="14" ry="26" transform="rotate(60 60 60)"/>
+          <ellipse cx="60" cy="32" rx="14" ry="26" transform="rotate(120 60 60)"/>
+          <ellipse cx="60" cy="32" rx="14" ry="26" transform="rotate(180 60 60)"/>
+          <ellipse cx="60" cy="32" rx="14" ry="26" transform="rotate(240 60 60)"/>
+          <ellipse cx="60" cy="32" rx="14" ry="26" transform="rotate(300 60 60)"/>
+        </g>
+      </g>
+    </symbol>
+  </svg>
+
+  <header class="top">
+    <div class="wrap">
+      <a class="brand" href="/"><svg aria-hidden="true"><use href="#mark"/></svg>{{ org }}</a>
+      <nav class="nav" aria-label="Main">
+        {% if authed %}
+          <a href="/issue"{% if path.startswith('/issue') %} aria-current="page"{% endif %}>New certificate</a>
+          <a href="/certs"{% if path.startswith('/certs') %} aria-current="page"{% endif %}>Certificates</a>
+          <a href="/trust"{% if path == '/trust' %} aria-current="page"{% endif %}>Trust page</a>
+          <a href="/ca"{% if path.startswith('/ca') %} aria-current="page"{% endif %}>CA</a>
+          <form method="post" action="/logout">
+            <input type="hidden" name="csrf_token" value="{{ csrf }}">
+            <button type="submit">Sign out</button>
+          </form>
+        {% endif %}
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <div class="wrap">
+      {% if authed and sealed %}
+        <p class="note warn" role="status">The CA is locked, so it can't issue or revoke certificates. <a href="/ca#unlock">Unlock it</a> with the CA passphrase.</p>
+      {% endif %}
+      {% if flashes %}
+        <div class="notes">
+          {% for level, text in flashes %}
+            <p class="note {{ level }}" role="status">{{ text }}</p>
+          {% endfor %}
+        </div>
+      {% endif %}
+      {% block content %}{% endblock %}
+    </div>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      <span>CertForge, a private certificate authority for your network.</span>
+      <a href="/trust">Trust this CA on a device</a>
+    </div>
+  </footer>
+</body>
+</html>

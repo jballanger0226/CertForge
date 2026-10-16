@@ -1,0 +1,28 @@
+{# Shared by the dashboard and the New certificate page. Expects `f`. #}
+<div class="grid2">
+  <div>
+    <label for="days">Valid for, in days <small>Up to {{ MAX_DAYS }}. Apple devices reject longer ones.</small></label>
+    <input id="days" name="days" type="number" min="1" max="{{ MAX_DAYS }}" value="{{ f.days }}" inputmode="numeric">
+  </div>
+  <div>
+    <label for="purpose">What it's for <small>Server and client works for almost everything.</small></label>
+    <select id="purpose" name="purpose">
+      {% for k, v in PURPOSES.items() %}<option value="{{ k }}"{% if f.purpose == k %} selected{% endif %}>{{ v }}</option>{% endfor %}
+    </select>
+  </div>
+  <div>
+    <label for="key_type">Key type <small>ECDSA P-256 is fast and modern. Pick RSA for very old software.</small></label>
+    <select id="key_type" name="key_type">
+      {% for k, v in KEY_TYPES.items() %}<option value="{{ k }}"{% if f.key_type == k %} selected{% endif %}>{{ v }}</option>{% endfor %}
+    </select>
+  </div>
+  <div>
+    <label for="p12">.p12 file format <small>Compatible opens everywhere, including macOS and older Windows.</small></label>
+    <select id="p12" name="p12">
+      <option value="compat"{% if f.p12 != 'modern' %} selected{% endif %}>Compatible (works everywhere)</option>
+      <option value="modern"{% if f.p12 == 'modern' %} selected{% endif %}>Modern (AES-256, newer systems only)</option>
+    </select>
+  </div>
+</div>
+<label for="password">Password for the .p12 file <small>Leave it blank and CertForge makes a strong one for you.</small></label>
+<input id="password" name="password" type="text" autocomplete="off" spellcheck="false" value="" maxlength="128">

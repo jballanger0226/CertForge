@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Set up your CA – CertForge{% endblock %}
+{% block content %}
+<h1>Set up your certificate authority</h1>
+<p class="lede">This takes about a minute. CertForge will create a root and an intermediate CA, protect their keys and give itself a certificate, so this page stops showing a warning once you trust the root.</p>
+
+{% if error %}<p class="note error" role="alert">{{ error }}</p>{% endif %}
+
+<form method="post" action="/setup" class="narrow" data-busy="Creating your CA, this can take a few seconds...">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+
+  <section>
+    <h2>Prove it's you</h2>
+    <label for="token">Setup code <small>Printed in the server log when CertForge started. In Docker, run <code>docker logs certforge</code>.</small></label>
+    <input id="token" name="token" required autocomplete="off" autocapitalize="none" spellcheck="false" class="mono">
+  </section>
+
+  <section>
+    <h2>Name your CA</h2>
+    <label for="org">Organization or home name <small>It appears in your certificates, for example "Home Lab". It can't be changed later.</small></label>
+    <input id="org" name="org" required maxlength="40" value="{{ f.org }}" autocomplete="organization">
+  </section>
+
+  <section>
+    <h2>Admin login</h2>
+    <label for="admin_password">Admin password <small>At least 12 characters.</small></label>
+    <input id="admin_password" name="admin_password" type="password" minlength="12" required autocomplete="new-password">
+    <label for="admin_password2">Admin password again</label>
+    <input id="admin_password2" name="admin_password2" type="password" minlength="12" required autocomplete="new-password">
+  </section>
+
+  <section>
+    <h2>Protect the CA keys</h2>
+    <p>The CA keys are encrypted with a passphrase that only you know. You'll need it to renew the intermediate in a few years, and to restore the root from a backup.</p>
+    <label for="passphrase">CA passphrase <small>At least 12 characters, and different from the admin password. Write it down. It can't be recovered.</small></label>
+    <input id="passphrase" name="passphrase" type="password" minlength="12" required autocomplete="off" class="mono">
+    <p class="mt"><button type="button" class="btn quiet small" data-generate="#passphrase">Generate one for me</button></p>
+    <label class="check"><input type="checkbox" name="seal" value="1"{% if f.seal %} checked{% endif %}>
+      <span>Ask for the passphrase after every restart. More secure, because a stolen disk or backup can't sign anything. Until someone unlocks it, the server can't issue or revoke certificates.</span></label>
+  </section>
+
+  <section>
+    <h2>How will people reach this server?</h2>
+    <label for="ui_names">Names and addresses <small>Everything you might type into a browser to reach this page. One per line.</small></label>
+    <textarea id="ui_names" name="ui_names" required autocomplete="off" autocapitalize="none" spellcheck="false">{{ f.ui_names }}</textarea>
+    <label for="public_host">Address for CA downloads and revocation checks <small>Optional. Defaults to the first name above. It's written into the certificates you issue, so pick a name that won't change.</small></label>
+    <input id="public_host" name="public_host" value="{{ f.public_host }}" autocomplete="off" autocapitalize="none" spellcheck="false">
+  </section>
+
+  <details class="opts">
+    <summary>Advanced</summary>
+    <label for="key_type">CA key type <small>ECDSA is modern and fast. RSA 4096 suits very old equipment.</small></label>
+    <select id="key_type" name="key_type">
+      {% for k, v in CA_KEY_TYPES.items() %}<option value="{{ k }}"{% if f.key_type == k %} selected{% endif %}>{{ v }}</option>{% endfor %}
+    </select>
+    <div class="grid2">
+      <div>
+        <label for="root_years">Root lifetime, in years</label>
+        <input id="root_years" name="root_years" type="number" min="5" max="30" value="{{ f.root_years }}">
+      </div>
+      <div>
+        <label for="int_years">Intermediate lifetime, in years</label>
+        <input id="int_years" name="int_years" type="number" min="1" max="15" value="{{ f.int_years }}">
+      </div>
+    </div>
+    <label for="permitted">Only issue for these domains and networks <small>Optional but a good safety net: if the CA is ever stolen, it still can't vouch for google.com. Example: home.arpa, lan, 192.168.0.0/16. Leave empty for no limit.</small></label>
+    <textarea id="permitted" name="permitted" autocomplete="off" autocapitalize="none" spellcheck="false">{{ f.permitted }}</textarea>
+  </details>
+
+  <div class="actions">
+    <button class="btn big" type="submit">Create my certificate authority</button>
+  </div>
+</form>
+{% endblock %}

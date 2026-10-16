@@ -1,0 +1,32 @@
+{# The CA's seal. Its ring of text is the CA's own name, so every CA's seal is different. #}
+{% macro seal(org) -%}
+{% set label = (org ~ ' Certificate Authority') if org|length <= 28 else org %}
+<svg class="seal" viewBox="0 0 120 120" role="img" aria-label="Seal of {{ org }}">
+  <defs>
+    <path id="seal-ring" d="M 16 60 A 44 44 0 1 1 104 60 A 44 44 0 1 1 16 60"/>
+  </defs>
+  <g fill="none" stroke="currentColor">
+    <circle cx="60" cy="60" r="57" stroke-width="2.6"/>
+    <circle cx="60" cy="60" r="52.5" stroke-width="0.8"/>
+    <circle cx="60" cy="60" r="35" stroke-width="0.8"/>
+    <g stroke-width="0.9">
+      <ellipse cx="60" cy="44" rx="7" ry="15"/>
+      <ellipse cx="60" cy="44" rx="7" ry="15" transform="rotate(30 60 60)"/>
+      <ellipse cx="60" cy="44" rx="7" ry="15" transform="rotate(60 60 60)"/>
+      <ellipse cx="60" cy="44" rx="7" ry="15" transform="rotate(90 60 60)"/>
+      <ellipse cx="60" cy="44" rx="7" ry="15" transform="rotate(120 60 60)"/>
+      <ellipse cx="60" cy="44" rx="7" ry="15" transform="rotate(150 60 60)"/>
+      <ellipse cx="60" cy="44" rx="7" ry="15" transform="rotate(180 60 60)"/>
+      <ellipse cx="60" cy="44" rx="7" ry="15" transform="rotate(210 60 60)"/>
+      <ellipse cx="60" cy="44" rx="7" ry="15" transform="rotate(240 60 60)"/>
+      <ellipse cx="60" cy="44" rx="7" ry="15" transform="rotate(270 60 60)"/>
+      <ellipse cx="60" cy="44" rx="7" ry="15" transform="rotate(300 60 60)"/>
+      <ellipse cx="60" cy="44" rx="7" ry="15" transform="rotate(330 60 60)"/>
+    </g>
+  </g>
+  <circle cx="60" cy="60" r="4.5" fill="currentColor"/>
+  <text font-size="7.6" letter-spacing="0.7" fill="currentColor" font-family="Georgia, serif" text-anchor="middle">
+    <textPath href="#seal-ring" startOffset="25%">{{ label }}</textPath>
+  </text>
+</svg>
+{%- endmacro %}

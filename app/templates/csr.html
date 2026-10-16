@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Sign a CSR – {{ org }}{% endblock %}
+{% block content %}
+<h1>Sign a certificate request</h1>
+<nav class="seg" aria-label="How to make the certificate">
+  <a href="/issue">Make one for me</a>
+  <a href="/issue/csr" aria-current="page">Sign a CSR</a>
+</nav>
+<p class="lede">A CSR comes from the server or device that will use the certificate, so its private key never has to leave it. Paste the request or upload the file.</p>
+
+{% if error %}<p class="note error" role="alert">{{ error }}</p>{% endif %}
+
+<form method="post" action="/issue/csr" enctype="multipart/form-data" class="narrow">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <label for="csr_text">Paste the CSR <small>It starts with -----BEGIN CERTIFICATE REQUEST-----</small></label>
+  <textarea id="csr_text" name="csr_text" class="mono" autocomplete="off" spellcheck="false" placeholder="-----BEGIN CERTIFICATE REQUEST-----">{{ text }}</textarea>
+  <label for="csr_file">Or upload a file <small>.csr or .pem</small></label>
+  <input id="csr_file" name="csr_file" type="file" accept=".csr,.pem,.req,.txt">
+  <div class="actions">
+    <button class="btn big" type="submit">Review request</button>
+  </div>
+</form>
+
+<details class="opts narrow">
+  <summary>How do I make a CSR?</summary>
+  <p>Most servers, routers, NAS boxes and hypervisors have a "generate CSR" button in their certificate settings. On a Linux machine with OpenSSL:</p>
+  <pre class="cmd">openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+  -keyout server.key -out server.csr \
+  -subj "/CN=nas.home.arpa" -addext "subjectAltName=DNS:nas.home.arpa,IP:192.168.1.20"</pre>
+  <p class="small">Keep server.key on the server. Only server.csr comes here.</p>
+</details>
+{% endblock %}

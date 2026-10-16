@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% block title %}Certificate authority – {{ org }}{% endblock %}
+{% block content %}
+<h1>Certificate authority</h1>
+<p class="lede">Your two-level chain of trust, where its keys are kept, and the settings that rarely change.</p>
+
+<section>
+  <h2>Chain of trust</h2>
+  <p>Devices trust the <strong>root</strong>. It signed the <strong>intermediate</strong>, and the intermediate signs your certificates. That way the root key can stay offline.</p>
+  <div class="dl">
+    {% for label, c in [('Root CA', ca.root), ('Intermediate CA', ca.intermediate)] %}
+    <div>
+      <h3>{{ label }}</h3>
+      <dl class="facts">
+        <dt>Name</dt><dd>{{ c.subject }}</dd>
+        <dt>Valid until</dt><dd>{{ c.not_after|date }}</dd>
+        <dt>Key</dt><dd>{{ c.key }}</dd>
+        {% if label == 'Intermediate CA' and ca.permitted %}<dt>Limited to</dt><dd>{{ ca.permitted|join(', ') }}</dd>{% endif %}
+        <dt>Fingerprint</dt><dd class="hex">{% for line in c.sha256|fp_lines %}{{ line }}<br>{% endfor %}</dd>
+      </dl>
+    </div>
+    {% endfor %}
+  </div>
+  <p class="mt">Download both from <a href="/trust">the trust page</a>.</p>
+</section>
+
+<section>
+  <h2>Where the keys are</h2>
+
+  <h3>Root key</h3>
+  {% if ca.root_key_present %}
+    <p>The root key is on this server, encrypted with your CA passphrase. It's only needed to renew the intermediate in a few years, so the safest place for it is somewhere else.</p>
+    <form method="post" action="/ca/root-key/export" class="narrow">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <label for="exp-pass">CA passphrase</label>
+      <input id="exp-pass" name="passphrase" type="password" autocomplete="off" required>
+      <div class="actions"><button class="btn quiet" type="submit">Download encrypted backup</button></div>
+    </form>
+    <details class="opts">
+      <summary>Remove the root key from this server</summary>
+      <p>After this, anyone who breaks into the server can't touch your root. Your backup becomes the only copy, so store it somewhere safe first. You'll upload it again when you renew the intermediate.</p>
+      {% if not ca.root_key_exported %}<p class="note warn">Download the backup above first. Removal is blocked until you have.</p>{% endif %}
+      <form method="post" action="/ca/root-key/remove" class="narrow">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <label for="confirm">Type <strong>remove root key</strong> to confirm</label>
+        <input id="confirm" name="confirm" autocomplete="off" required>
+        <div class="actions"><button class="btn danger" type="submit">Remove root key</button></div>
+      </form>
+    </details>
+  {% else %}
+    <p class="note ok">The root key is not on this server. That's the safest setup. Keep your backup somewhere secure.</p>
+  {% endif %}
+
+  <h3 id="unlock">Intermediate key</h3>
+  {% if ca.sealed %}
+    <p class="note warn">The intermediate key is locked. Enter the CA passphrase to let the CA issue and revoke certificates again.</p>
+    <form method="post" action="/ca/unlock" class="narrow">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <label for="unlock-pass">CA passphrase</label>
+      <input id="unlock-pass" name="passphrase" type="password" autocomplete="off" required>
+      <div class="actions"><button class="btn" type="submit">Unlock CA</button></div>
+    </form>
+  {% else %}
+    <p>The intermediate key is loaded, so this server can sign certificates on its own. It's stored in a folder only the CertForge user can read.</p>
+  {% endif %}
+</section>
+
+<section>
+  <h2>Web certificate</h2>
+  <p>The certificate for this page{% if ca.ui %}, valid until {{ ca.ui.not_after|date }}{% endif %}. Add every name and address people will use to reach CertForge.</p>
+  <form method="post" action="/ca/ui-names" class="narrow">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label for="ui-names">Names and addresses</label>
+    <textarea id="ui-names" name="names" required autocomplete="off" autocapitalize="none" spellcheck="false">{{ names }}</textarea>
+    <div class="actions"><button class="btn quiet" type="submit">Save and re-issue</button></div>
+  </form>
+</section>
+
+<section>
+  <h2>Revocation list</h2>
+  {% if ca.crl %}
+    <dl class="facts">
+      <dt>Address</dt><dd class="hex">http://{{ ca.public_host }}/pki/intermediate.crl</dd>
+      <dt>Revoked certificates</dt><dd>{{ ca.crl.count }}</dd>
+      <dt>Last updated</dt><dd>{{ ca.crl.last_update|datetime }}</dd>
+      <dt>Refreshes before</dt><dd>{{ ca.crl.next_update|datetime }}</dd>
+    </dl>
+  {% else %}
+    <p>No revocation list has been published yet. It appears when you first revoke a certificate or unlock the CA.</p>
+  {% endif %}
+  <p class="mt">New certificates tell clients where to find this list and the CA files. Change the address if people reach the server by another name.</p>
+  <form method="post" action="/ca/public-host" class="narrow">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label for="host">Public address</label>
+    <input id="host" name="host" value="{{ ca.public_host or '' }}" required autocomplete="off" autocapitalize="none" spellcheck="false">
+    <div class="actions"><button class="btn quiet" type="submit">Save address</button></div>
+  </form>
+</section>
+
+<section>
+  <h2>Renew the intermediate</h2>
+  <p>The intermediate expires on {{ ca.intermediate.not_after|date }}. Renewing signs it again with the root, with the same name and key, so every certificate you've issued keeps working.</p>
+  <form method="post" action="/ca/intermediate/renew" enctype="multipart/form-data" class="narrow">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label for="ren-pass">CA passphrase</label>
+    <input id="ren-pass" name="passphrase" type="password" autocomplete="off" required>
+    <label for="years">New lifetime, in years</label>
+    <input id="years" name="years" type="number" min="1" max="15" value="10">
+    {% if not ca.root_key_present %}
+      <label for="root_key">Root key backup <small>The file you downloaded earlier. It stays encrypted and is used once.</small></label>
+      <input id="root_key" name="root_key" type="file" required>
+    {% endif %}
+    <div class="actions"><button class="btn quiet" type="submit">Renew intermediate</button></div>
+  </form>
+</section>
+
+<section>
+  <h2>Admin password</h2>
+  <form method="post" action="/account/password" class="narrow">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label for="cur">Current password</label>
+    <input id="cur" name="current" type="password" autocomplete="current-password" required>
+    <label for="new">New password <small>At least 12 characters.</small></label>
+    <input id="new" name="new" type="password" autocomplete="new-password" minlength="12" required>
+    <label for="new2">New password again</label>
+    <input id="new2" name="new2" type="password" autocomplete="new-password" minlength="12" required>
+    <div class="actions"><button class="btn quiet" type="submit">Change password</button></div>
+  </form>
+</section>
+
+<section>
+  <h2>Activity</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>When</th><th>What</th></tr></thead>
+      <tbody>
+        {% for a in audit %}
+        <tr><td class="small">{{ a.ts|datetime }}</td><td>{{ a.detail or a.action }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

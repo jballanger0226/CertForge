@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}New certificate – {{ org }}{% endblock %}
+{% block content %}
+<h1>New certificate</h1>
+<nav class="seg" aria-label="How to make the certificate">
+  <a href="/issue" aria-current="page">Make one for me</a>
+  <a href="/issue/csr">Sign a CSR</a>
+</nav>
+<p class="lede">CertForge creates the private key, signs the certificate and gives you the files. The key is shown once and never stored.</p>
+
+{% if error %}<p class="note error" role="alert">{{ error }}</p>{% endif %}
+
+<form method="post" action="/issue" class="narrow" data-busy="Creating...">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <label for="names">Names <small>Host names and IP addresses, separated by commas or new lines. The first one becomes the certificate's name.</small></label>
+  <textarea id="names" name="names" required autofocus autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="nas.home.arpa&#10;192.168.1.20">{{ f.names }}</textarea>
+  {% include "_options.html" %}
+  <div class="actions">
+    <button class="btn big" type="submit">Create certificate</button>
+  </div>
+</form>
+{% endblock %}

@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% from "_seal.html" import seal %}
+{% block title %}{{ c.cn }} – {{ org }}{% endblock %}
+{% block content %}
+
+<h1>{% if new %}{{ 'Certificate signed' if c.source == 'csr' else 'Certificate created' }}{% else %}{{ c.cn }}{% endif %}</h1>
+
+<div class="sheet{% if new %} stamped{% endif %}">
+  {{ seal(org) }}
+  <dl class="facts">
+    {% if new %}<dt>Name</dt><dd><strong>{{ c.cn }}</strong></dd>{% endif %}
+    <dt>Valid for</dt>
+    <dd><ul class="names">{% for n in c.sans %}<li>{{ n }}</li>{% endfor %}</ul></dd>
+    <dt>Status</dt>
+    <dd>
+      <span class="status {{ c.status }}">{{ {'valid': 'Valid', 'expiring': 'Expiring soon', 'expired': 'Expired', 'revoked': 'Revoked'}[c.status] }}</span>
+      {% if c.revoked_at %}<span class="small"> on {{ c.revoked_at|date }}: {{ REASONS.get(c.revoke_reason, c.revoke_reason) }}</span>{% endif %}
+    </dd>
+    <dt>Valid</dt>
+    <dd>{{ c.not_before|date }} to {{ c.not_after|date }}{% if c.status in ('valid', 'expiring') %} ({{ c.days_left }} days left){% endif %}</dd>
+    <dt>Used for</dt><dd>{{ PURPOSES.get(c.purpose, c.purpose) }}</dd>
+    <dt>Key</dt><dd>{{ c.key_desc }}</dd>
+    <dt>Serial number</dt><dd class="hex">{{ c.serial }}</dd>
+    <dt>Fingerprint (SHA-256)</dt><dd class="hex">{% for line in c.sha256|fp_lines %}{{ line }}<br>{% endfor %}</dd>
+    <dt>Issued</dt><dd>{{ c.issued_at|datetime }}</dd>
+  </dl>
+</div>
+
+{% if c.source == 'system' %}
+  <p class="note info">This certificate secures the CertForge web page you're looking at. It renews itself automatically in the last 30 days, as long as the CA is unlocked. You can change its names on the <a href="/ca">CA page</a>.</p>
+{% endif %}
+
+{% if pkg %}
+<section>
+  <h2>Download your files</h2>
+  <div class="dl">
+    <div>
+      <h3>PKCS#12 (.p12)</h3>
+      <p>One file with the key, certificate and chain. For Windows, macOS, IIS, Java and most appliances.</p>
+      <div class="pw"><span>Password</span><span class="hex" id="p12pw">{{ pkg.password }}</span><button type="button" class="btn quiet small" data-copy="#p12pw">Copy</button></div>
+      <a class="btn" href="/certs/{{ c.serial }}/download/p12">Download .p12</a>
+      <p class="small mt">{{ 'Compatible format: opens on macOS and older Windows too.' if pkg.legacy else 'Modern AES-256 format: needs a recent OS or Java 17+.' }}</p>
+    </div>
+    <div>
+      <h3>PEM bundle (.zip)</h3>
+      <p>The certificate, private key and chain as separate files, with setup notes. For nginx, Apache, HAProxy and other Linux software.</p>
+      <a class="btn" href="/certs/{{ c.serial }}/download/zip">Download .zip</a>
+    </div>
+  </div>
+  <p class="note warn mt">This is the only time you can get the private key. CertForge doesn't keep it, and it leaves the server's memory in about {{ pkg_minutes }} minute{{ 's' if pkg_minutes != 1 }}.</p>
+  {% for n in pkg.notices %}<p class="note info">{{ n }}</p>{% endfor %}
+  <form method="post" action="/certs/{{ c.serial }}/discard-key">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <button class="btn quiet small" type="submit">I have the files, wipe the key now</button>
+  </form>
+</section>
+{% elif new and c.source == 'generated' %}
+  <p class="note warn">The private key is no longer on the server, so the .p12 and .zip downloads are gone. The certificate files below still work, but you'll need the key you saved earlier.</p>
+{% endif %}
+
+<section>
+  <h2>{{ 'Certificate files' if not pkg else 'Certificate only' }}</h2>
+  <p>{% if c.source == 'csr' and new %}Install the .cer on the server that made the request. If it asks for the chain too, use the .pem file.{% else %}These contain no private key, so they're safe to share.{% endif %}</p>
+  <ul class="links">
+    <li><a href="/certs/{{ c.serial }}/download/cer">Certificate (.cer)</a> <span class="small">Base64 text, the usual choice</span></li>
+    <li><a href="/certs/{{ c.serial }}/download/der">Certificate (.der)</a> <span class="small">binary</span></li>
+    <li><a href="/certs/{{ c.serial }}/download/fullchain">Certificate and intermediate (.pem)</a> <span class="small">what most servers want</span></li>
+    <li><a href="/certs/{{ c.serial }}/download/p7b">Certificate and CA chain (.p7b)</a> <span class="small">for Windows</span></li>
+  </ul>
+  {% if new %}
+    <p class="note info mt">Devices that don't trust your root CA yet will warn about this certificate. Send them to <a href="/trust">the trust page</a>.</p>
+  {% endif %}
+</section>
+
+<section>
+  <h2>Manage</h2>
+  <p><a href="/issue?names={{ c.sans|join(',')|urlencode }}&amp;purpose={{ c.purpose }}">Make another certificate like this one</a></p>
+  {% if not c.revoked_at and c.source != 'system' %}
+  <details class="opts">
+    <summary>Revoke this certificate</summary>
+    <p>Revoking puts the certificate on the revocation list that clients can check. Do it if the private key was exposed or the certificate isn't needed any more. It can't be undone.</p>
+    <form method="post" action="/certs/{{ c.serial }}/revoke" class="narrow">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <label for="reason">Why?</label>
+      <select id="reason" name="reason">
+        {% for k, v in REASONS.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}
+      </select>
+      <div class="actions"><button class="btn danger" type="submit">Revoke certificate</button></div>
+    </form>
+  </details>
+  {% endif %}
+</section>
+{% endblock %}

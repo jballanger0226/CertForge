@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% from "_seal.html" import seal %}
+{% block title %}Your CA is ready – {{ org }}{% endblock %}
+{% block content %}
+<h1>Your CA is ready</h1>
+
+<div class="sheet stamped">
+  {{ seal(org) }}
+  <dl class="facts">
+    <dt>Root CA</dt><dd>{{ ca.root.subject }}, valid until {{ ca.root.not_after|date }}</dd>
+    <dt>Intermediate CA</dt><dd>{{ ca.intermediate.subject }}, valid until {{ ca.intermediate.not_after|date }}</dd>
+    <dt>Keys</dt><dd>{{ ca.key_type }}{% if ca.sealed %}, locked{% endif %}</dd>
+    <dt>Root fingerprint (SHA-256)</dt><dd class="hex">{% for line in ca.root.sha256|fp_lines %}{{ line }}<br>{% endfor %}</dd>
+  </dl>
+</div>
+
+<section>
+  <h2>Three things to do now</h2>
+  <ol>
+    <li><strong>Trust the root on this computer.</strong> Download it below and follow the steps on the <a href="/trust">trust page</a>. Until you do, your browser will warn about this site, even though CertForge has already switched it to its new certificate.</li>
+    <li><strong>Back up the root key.</strong> On the <a href="/ca">CA page</a>, download the encrypted backup and keep it somewhere safe, then remove the key from this server.</li>
+    <li><strong>Make a certificate.</strong> Type a name on the home page and you'll have a signed certificate in seconds.</li>
+  </ol>
+  <div class="big-actions">
+    <a class="btn big" href="/pki/root.crt">Download root certificate</a>
+    <a class="btn quiet big" href="/">Open CertForge</a>
+  </div>
+</section>
+{% endblock %}

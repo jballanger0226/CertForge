@@ -1,0 +1,25 @@
+services:
+  certforge:
+    build: .
+    image: certforge:latest
+    container_name: certforge
+    restart: unless-stopped
+    ports:
+      - "443:443"
+      - "80:80"          # serves the CA files and revocation list to clients; redirects everything else to 443
+    environment:
+      # Names and addresses people will use to reach this server (comma separated).
+      CERTFORGE_HOSTNAMES: "certforge.lan,localhost"
+      # Optional: choose your own first-run setup token instead of reading it from `docker logs certforge`.
+      # CERTFORGE_SETUP_TOKEN: "change-me"
+    volumes:
+      - certforge-data:/data
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: 0    # lets the non-root user bind 443 and 80
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/tmp"]
+
+volumes:
+  certforge-data:

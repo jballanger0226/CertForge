@@ -1,0 +1,39 @@
+[Unit]
+Description=CertForge private certificate authority
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=certforge
+Group=certforge
+WorkingDirectory=/opt/certforge
+Environment=CERTFORGE_DATA=/var/lib/certforge
+EnvironmentFile=-/etc/certforge.env
+ExecStart=/opt/certforge/venv/bin/python -m app.server
+Restart=on-failure
+RestartSec=3
+
+# Bind 443 and 80 without running as root
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/certforge
+StateDirectory=certforge
+StateDirectoryMode=0700
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

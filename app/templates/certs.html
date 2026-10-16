@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Certificates – {{ org }}{% endblock %}
+{% block content %}
+<h1>Certificates</h1>
+
+<form class="search" method="get" action="/certs" role="search">
+  <label class="sr" for="q">Search by name, address or serial number</label>
+  <input id="q" name="q" type="search" value="{{ q }}" placeholder="Search names, addresses or serial numbers" autocomplete="off">
+  {% if flt %}<input type="hidden" name="status" value="{{ flt }}">{% endif %}
+  <button class="btn quiet" type="submit">Search</button>
+</form>
+
+<nav class="filters" aria-label="Filter by status">
+  <a href="/certs{% if q %}?q={{ q|urlencode }}{% endif %}"{% if not flt %} aria-current="true"{% endif %}>All ({{ counts.total }})</a>
+  {% for key, label in [('valid', 'Valid'), ('expiring', 'Expiring soon'), ('expired', 'Expired'), ('revoked', 'Revoked')] %}
+    <a href="/certs?status={{ key }}{% if q %}&amp;q={{ q|urlencode }}{% endif %}"{% if flt == key %} aria-current="true"{% endif %}>{{ label }} ({{ counts[key] }})</a>
+  {% endfor %}
+</nav>
+
+{% if rows %}
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>Name</th><th>Status</th><th>Expires</th><th>Key</th><th>Made by</th></tr></thead>
+    <tbody>
+      {% for c in rows %}
+      <tr>
+        <td>
+          <a class="name" href="/certs/{{ c.serial }}">{{ c.cn }}</a>
+          {% if c.sans|length > 1 %}<span class="sub">{{ c.sans[:3]|join(', ') }}{% if c.sans|length > 3 %} and {{ c.sans|length - 3 }} more{% endif %}</span>{% endif %}
+        </td>
+        <td><span class="status {{ c.status }}">{{ {'valid': 'Valid', 'expiring': 'Expiring soon', 'expired': 'Expired', 'revoked': 'Revoked'}[c.status] }}</span></td>
+        <td>{{ c.not_after|date }}{% if c.status == 'expiring' %}<span class="sub">in {{ c.days_left }} day{{ 's' if c.days_left != 1 }}</span>{% endif %}</td>
+        <td>{{ c.key_desc }}</td>
+        <td>{{ {'generated': 'Created by CertForge', 'csr': 'Signed from a CSR', 'system': 'CertForge web UI'}[c.source] }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+  {% if q or flt %}
+    <p>No certificates match. <a href="/certs">Clear the search</a>.</p>
+  {% else %}
+    <p>Nothing has been issued yet. <a href="/issue">Make the first certificate</a>.</p>
+  {% endif %}
+{% endif %}
+{% endblock %}

@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}{{ org }}{% endblock %}
+{% block content %}
+
+{% for a in alerts %}
+  <p class="note {{ a.level }}">{{ a.text }} <a href="{{ a.href }}">Open</a></p>
+{% endfor %}
+
+<section class="hero">
+  <h1>Make a certificate</h1>
+  <p class="lede">Type the names it should work for. CertForge creates the key, signs it with your CA and gives you a file to install.</p>
+
+  <form class="hero-form" method="post" action="/issue" data-busy="Creating...">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label class="sr" for="names">Host names or IP addresses</label>
+    <div class="hero-row">
+      <input id="names" name="names" required autofocus autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="nas.home.arpa, 192.168.1.20">
+      <button class="btn big" type="submit">Create certificate</button>
+    </div>
+    <p class="hint">Separate several names with commas. Wildcards such as *.apps.home.arpa work too.</p>
+    <details class="opts">
+      <summary>Options</summary>
+      {% include "_options.html" %}
+    </details>
+    <p class="alt">Already have a certificate request from a server or device? <a href="/issue/csr">Sign a CSR instead</a>.</p>
+  </form>
+</section>
+
+<div class="cols">
+  <section aria-labelledby="recent">
+    <h2 id="recent">Recent certificates</h2>
+    {% if recent %}
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Name</th><th>Status</th><th>Expires</th></tr></thead>
+          <tbody>
+            {% for c in recent %}
+            <tr>
+              <td><a class="name" href="/certs/{{ c.serial }}">{{ c.cn }}</a>
+                {% if c.sans|length > 1 %}<span class="sub">and {{ c.sans|length - 1 }} more name{{ 's' if c.sans|length > 2 }}</span>{% endif %}</td>
+              <td><span class="status {{ c.status }}">{{ {'valid': 'Valid', 'expiring': 'Expiring soon', 'expired': 'Expired', 'revoked': 'Revoked'}[c.status] }}</span></td>
+              <td>{{ c.not_after|date }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <p class="counts mt">
+        <a href="/certs?status=valid">{{ counts.valid }} valid</a>,
+        <a href="/certs?status=expiring">{{ counts.expiring }} expiring soon</a>,
+        <a href="/certs?status=expired">{{ counts.expired }} expired</a>,
+        <a href="/certs?status=revoked">{{ counts.revoked }} revoked</a>.
+        <a href="/certs">See all certificates</a>
+      </p>
+    {% else %}
+      <p>Nothing has been issued yet. Type a name above and press Create certificate.</p>
+    {% endif %}
+  </section>
+
+  <section aria-labelledby="trust">
+    <h2 id="trust">Trust this CA</h2>
+    <p>Every device needs to trust your root certificate once. After that it accepts everything you issue.</p>
+    <p><a class="btn quiet" href="/trust">Open the trust page</a></p>
+    <p class="small">Send people this link:</p>
+    <p class="hex" id="trust-url">https://{{ host }}/trust</p>
+    <p><button class="btn quiet small" type="button" data-copy="#trust-url">Copy link</button></p>
+    <p class="small">Root fingerprint (SHA-256)</p>
+    <p class="hex">{% for line in ca.root.sha256|fp_lines %}{{ line }}<br>{% endfor %}</p>
+  </section>
+</div>
+{% endblock %}
