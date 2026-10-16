@@ -7,7 +7,7 @@ set -euo pipefail
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEST=/opt/certforge
 DATA=/var/lib/certforge
-NAMES="${1:-$(hostname -f 2>/dev/null || hostname),localhost}"
+NAMES="${1:-}"      # optional: names for the first web certificate. Without it, CertForge works them out from DHCP and DNS.
 
 if command -v apt-get >/dev/null; then
   apt-get update -qq && apt-get install -y -qq python3 python3-venv openssl
@@ -28,13 +28,21 @@ python3 -m venv "$DEST/venv"
 
 if [ ! -f /etc/certforge.env ]; then
   umask 077
-  printf 'CERTFORGE_HOSTNAMES=%s\n' "$NAMES" > /etc/certforge.env
+  {
+    [ -n "$NAMES" ] && printf 'CERTFORGE_HOSTNAMES=%s\n' "$NAMES"
+    echo '# Zero-touch setup: set both of these (or use CERTFORGE_ADMIN_PASSWORD_FILE / CERTFORGE_CA_PASSPHRASE_FILE)'
+    echo '# and the CA is created on the next start with no wizard. See the README.'
+    echo '# CERTFORGE_ADMIN_PASSWORD='
+    echo '# CERTFORGE_CA_PASSPHRASE='
+  } > /etc/certforge.env
 fi
+install -m 755 "$SRC/deploy/ct/certforge-code" /usr/local/bin/certforge-code
 install -m 644 "$SRC/deploy/certforge.service" /etc/systemd/system/certforge.service
 systemctl daemon-reload
 systemctl enable --now certforge
 
 echo
-echo "CertForge is starting. To finish setup, open https://${NAMES%%,*}/ and enter the setup code:"
+FIRST="${NAMES%%,*}"; [ -n "$FIRST" ] || FIRST="$(hostname -f 2>/dev/null || hostname)"
+echo "CertForge is starting. To finish setup, open https://$FIRST/ and enter the setup code (also: certforge-code):"
 sleep 3
 journalctl -u certforge --no-pager -n 40 | grep -i -A4 "needs one-time setup" || echo "  (run: journalctl -u certforge | grep -i -A4 'one-time setup')"

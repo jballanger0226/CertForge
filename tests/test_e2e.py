@@ -44,6 +44,17 @@ def sh(*args, input=None, check=True):
     return p
 
 
+def C_sans(cert) -> list[str]:
+    from app import ca
+    return ca.sans_of(cert)
+
+
+def json_setting(data: Path, key: str):
+    """A value from the CA's meta.json (e.g. public_host)."""
+    import json
+    return json.loads((data / "ca" / "meta.json").read_text()).get(key)
+
+
 def csrf_of(page: str) -> str:
     return re.search(r'name="csrf_token" value="([^"]+)"', page).group(1)
 
@@ -54,14 +65,16 @@ def T(r) -> str:
 
 
 class Server:
-    def __init__(self, data: Path, https_port=443, http_port=80, token="e2e-setup-token"):
+    def __init__(self, data: Path, https_port=443, http_port=80, token="e2e-setup-token", env=None):
         self.data, self.https, self.http, self.token = data, https_port, http_port, token
+        self.extra_env = env or {}
         self.proc = None
         self.log_path = data.parent / f"server-{https_port}.log"
 
     def start(self):
         env = {**os.environ, "CERTFORGE_DATA": str(self.data), "CERTFORGE_HOSTNAMES": NAMES.replace("\n", ","),
                "CERTFORGE_HTTPS_PORT": str(self.https), "CERTFORGE_HTTP_PORT": str(self.http)}
+        env.update(self.extra_env)
         if self.token:
             env["CERTFORGE_SETUP_TOKEN"] = self.token
         else:
@@ -111,16 +124,16 @@ class Base(unittest.TestCase):
     srv: Server
 
     @classmethod
-    def boot(cls, https=443, http=80, token="e2e-setup-token", seal=False):
+    def boot(cls, https=443, http=80, token="e2e-setup-token", seal=False, env=None, verify_with_root=False):
         cls.tmp = Path(tempfile.mkdtemp(prefix="certforge-e2e-"))
         cls.data = cls.tmp / "data"
-        cls.srv = Server(cls.data, https, http, token)
+        cls.srv = Server(cls.data, https, http, token, env)
         cls.srv.start()
         cls.addClassCleanup(cls.srv.stop)          # even if setUpClass fails below, never orphan the server
         cls.addClassCleanup(shutil.rmtree, cls.tmp, ignore_errors=True)
         cls.base = f"https://localhost{'' if https == 443 else f':{https}'}"
         cls.root = cls.data / "ca" / "root.crt"
-        cls.srv.wait(cls.data / "ui" / "bootstrap.crt")
+        cls.srv.wait(cls.root if verify_with_root else cls.data / "ui" / "bootstrap.crt")
 
     @classmethod
     def wait_for_ca_cert(cls, timeout=15):
@@ -615,6 +628,72 @@ class TestSealedAndSetupRules(Base):
         # revoking works now
         self.assertEqual(self.post(s, f"/certs/{serial}/revoke", data=dict(reason="superseded")).status_code, 303)
         self.assertIn("Revoked", s.get(f"{self.base}/certs/{serial}").text)
+
+
+class TestBlankFieldsUseDetectedSettings(Base):
+    """Setup with only the code and the two secrets: org, names and public address come from the network."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.boot(https=8444, http=0)
+
+    def test_setup_form_is_prefilled_and_blank_fields_are_filled_in(self):
+        s = requests.Session(); s.verify = str(self.data / "ui" / "bootstrap.crt")
+        page = T(s.get(f"{self.base}/setup"))
+        self.assertIn("looked at the network", page)
+        self.assertIn("ca.lab.test", page)                         # names from CERTFORGE_HOSTNAMES are shown
+        self.assertNotIn(" required", re.search(r'<textarea id="ui_names"[^>]*>', page).group(0))
+        r = do_setup(self.base, self.data / "ui" / "bootstrap.crt", "e2e-setup-token", org="", ui_names="", public_host="")
+        self.assertEqual(r.status_code, 200, T(r)[:400])
+        self.wait_for_ca_cert()
+        ca = T(requests.get(f"{self.base}/trust", verify=str(self.root)))
+        self.assertRegex(ca, r"Trust .+ on this device")           # a non-empty organization was chosen
+        cert = x509.load_pem_x509_certificate((self.data / "ui" / "ui.crt").read_bytes())
+        self.assertEqual(set(C_sans(cert)), {"localhost", "127.0.0.1", "ca.lab.test"})
+        self.assertEqual(json_setting(self.data, "public_host"), "localhost")
+
+
+class TestHeadlessSetup(Base):
+    """CERTFORGE_ADMIN_PASSWORD + CERTFORGE_CA_PASSPHRASE: the CA exists before the first request."""
+
+    @classmethod
+    def setUpClass(cls):
+        secretdir = Path(tempfile.mkdtemp(prefix="certforge-secrets-"))
+        cls.addClassCleanup(shutil.rmtree, secretdir, ignore_errors=True)
+        (secretdir / "ca").write_text(PASS + "\n")
+        cls.boot(https=8445, http=0, token=None, verify_with_root=True, env={
+            "CERTFORGE_ADMIN_PASSWORD": ADMIN, "CERTFORGE_CA_PASSPHRASE_FILE": str(secretdir / "ca"),
+            "CERTFORGE_ORG": "Auto Lab", "CERTFORGE_SEAL": "true", "CERTFORGE_PUBLIC_HOST": "pki.lab.test"})
+
+    def test_ca_is_ready_and_nothing_secret_is_logged(self):
+        log = self.srv.log_path.read_text()
+        self.assertIn("set up automatically", log)
+        self.assertNotIn(ADMIN, log)
+        self.assertNotIn(PASS, log)
+        self.assertFalse((self.data / "setup.token").exists())
+        s = requests.Session(); s.verify = str(self.root)
+        self.assertEqual(s.get(f"{self.base}/setup", allow_redirects=False).status_code, 303)    # no setup page to hijack
+        self.assertIn("Auto Lab Root CA", s.get(f"{self.base}/trust").text)
+        self.assertEqual(json_setting(self.data, "public_host"), "pki.lab.test")
+        s = self.login()
+        self.assertIn("Certificate authority", s.get(f"{self.base}/ca").text)
+
+    def test_sealed_after_restart_and_unlocks_with_the_passphrase(self):
+        self.srv.stop(); self.srv.start(); self.srv.wait(self.root)
+        s = self.login()
+        self.assertIn("The CA is locked", s.get(self.base + "/").text)
+        self.post(s, "/ca/unlock", data=dict(passphrase=PASS))
+        self.assertNotIn("The CA is locked", s.get(self.base + "/").text)
+
+
+class TestBadHeadlessSettingsFailLoudly(unittest.TestCase):
+    def test_short_secrets_stop_the_server_with_a_reason(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = {**os.environ, "CERTFORGE_DATA": d, "CERTFORGE_HTTPS_PORT": "8446", "CERTFORGE_HTTP_PORT": "0",
+                   "CERTFORGE_ADMIN_PASSWORD": "short", "CERTFORGE_CA_PASSPHRASE": "short"}
+            p = subprocess.run([sys.executable, "-m", "app.server"], cwd=ROOT, env=env, capture_output=True, text=True, timeout=60)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("Automatic setup failed", p.stderr + p.stdout)
 
 
 if __name__ == "__main__":

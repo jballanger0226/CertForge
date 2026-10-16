@@ -48,8 +48,8 @@ jobs:
             requirements.txt
             requirements-dev.txt
       - run: pip install -r requirements.txt -r requirements-dev.txt
-      - name: CA engine tests (checked against the OpenSSL command line)
-        run: python -m unittest tests.test_ca -v
+      - name: Engine, name-detection and service tests (CA checked against the OpenSSL command line)
+        run: python -m unittest tests.test_ca tests.test_netinfo tests.test_service -v
       - name: End-to-end tests (real server on ports 443 and 80)
         # Ports below 1024 need root; run the same interpreter with the same packages.
         run: sudo -E "$(which python)" -m unittest tests.test_e2e -v

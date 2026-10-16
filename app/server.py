@@ -113,6 +113,18 @@ def start_http_helper(svc: Service, cfg: Config) -> None:
 
 # ---- background jobs ------------------------------------------------------------
 
+def bootstrap_watcher(svc: Service) -> None:
+    """Until setup is done, notice when DHCP gives this server a new address or name and refresh the temporary certificate."""
+    while not svc.is_setup():
+        time.sleep(60)
+        try:
+            if svc.bootstrap_stale():
+                log("This server's name or address changed; refreshing the temporary web certificate.")
+                svc.notify_tls_changed()
+        except Exception as e:
+            log(f"Network check failed: {e}")
+
+
 def maintenance_loop(svc: Service) -> None:
     while True:
         try:
@@ -197,6 +209,17 @@ def main() -> None:
         raise SystemExit("The openssl command-line tool is required (it encrypts the CA keys). Install it and retry.")
     check_port(cfg.bind, cfg.https_port)
 
+    if cfg.auto and not svc.is_setup():
+        try:
+            svc.auto_setup()
+        except C.CAError as e:
+            raise SystemExit(f"Automatic setup failed: {e}")
+        log("=" * 64)
+        log(" CertForge was set up automatically from its CERTFORGE_* settings.")
+        log(f" CA '{svc.ca.meta['org']}', web page: https://{svc.ca.public_host}/")
+        log(" Sign in with the admin password you provided. To stop keeping the")
+        log(" passwords in the environment, remove them now; they aren't needed again.")
+        log("=" * 64)
     if not svc.is_setup():
         first = (svc.initial_names().splitlines() or ["this-server"])[0]
         url = f"https://{first}" + ("" if cfg.https_port == 443 else f":{cfg.https_port}") + "/"
@@ -227,6 +250,8 @@ def main() -> None:
     except Exception as e:
         log(f"Live certificate switching isn't available here ({e}); the server will restart instead.")
         holder = None
+    if not svc.is_setup():
+        threading.Thread(target=bootstrap_watcher, args=(svc,), name="netwatch", daemon=True).start()
     threading.Thread(target=maintenance_loop, args=(svc,), name="maintenance", daemon=True).start()
     threading.Thread(target=tls_watcher, args=(svc, holder), name="tls", daemon=True).start()
     uvicorn.Server(config).run()

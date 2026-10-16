@@ -7,6 +7,7 @@ import plistlib
 import secrets
 import socket
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -16,6 +17,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 
 from . import ca as C
+from . import netinfo
 from .config import Config
 from .security import MIN_PASSWORD, Ephemeral, RateLimiter, hash_password, random_password, verify_password
 from .store import Store, iso, parse_iso, utcnow
@@ -60,6 +62,8 @@ class Service:
         self.tls_changed = threading.Event()   # set when the web certificate on disk changed
         self._setup_lock = threading.Lock()
         self._setup_done = False
+        self._net_cache: dict[str, tuple[float, netinfo.NetInfo]] = {}
+        self._bootstrap_names: list[str] = []
         self.secret = self._secret()
 
     # ---- bootstrap ------------------------------------------------------
@@ -82,36 +86,25 @@ class Service:
             self._setup_done = self.ca.initialized() and self.store.get("admin_hash") is not None
         return self._setup_done
 
-    @staticmethod
-    def detect_names(extra: str = "") -> list[str]:
-        """Best guesses for what this server is called, for pre-filling forms."""
-        found: list[str] = []
-        for part in (extra or "").replace(",", " ").split():
-            found.append(part)
-        host = socket.gethostname()
-        for n in (host, socket.getfqdn(), "localhost"):
-            if n and n not in found:
-                found.append(n)
-        ips: list[str] = []
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("10.255.255.255", 1))      # no packets are sent; picks the outbound interface
-            ips.append(s.getsockname()[0]); s.close()
-        except OSError:
-            pass
-        try:
-            ips += [ai[4][0] for ai in socket.getaddrinfo(host, None, socket.AF_INET)]
-        except OSError:
-            pass
-        ips.append("127.0.0.1")
-        for ip in ips:
-            if ip not in found and not ip.startswith("0."):
-                found.append(ip)
-        return found
+    # ---- what is this server called? ----------------------------------------------------------
+    def net(self, request_host: str = "") -> netinfo.NetInfo:
+        """Detected host name, domain, addresses and a suggested public address (cached briefly)."""
+        key = request_host.strip().lower()
+        now = time.monotonic()
+        hit = self._net_cache.get(key)
+        if hit and now - hit[0] < 30:
+            return hit[1]
+        info = netinfo.detect(key)
+        self._net_cache[key] = (now, info)
+        return info
 
     def initial_names(self, request_host: str = "") -> str:
+        """Names for the first web certificate: CERTFORGE_HOSTNAMES if set, otherwise what the network tells us."""
         base = self.cfg.hostnames.replace(",", " ").split() if self.cfg.hostnames else []
-        names = self.detect_names(request_host) if not base else [*([request_host] if request_host else []), *base]
+        if base:
+            names = [*([request_host] if request_host else []), *base]
+        else:
+            names = [*([request_host] if request_host else []), *(self.net().names or ["localhost", "127.0.0.1"])]
         out: list[str] = []
         for n in names:
             try:
@@ -121,6 +114,14 @@ class Service:
             except C.CAError:
                 pass
         return "\n".join(out)
+
+    def default_public_host(self, request_host: str = "") -> tuple[str, str]:
+        """(address for CA downloads and revocation checks, a warning about it or "")."""
+        if self.cfg.hostnames:
+            first = self.cfg.hostnames.replace(",", " ").split()[0]
+            return first, ""
+        info = self.net(request_host)
+        return info.public_host, info.public_note
 
     # ---- first-run setup --------------------------------------------------
     def setup(self, *, token: str, org: str, admin_password: str, admin_password2: str, passphrase: str,
@@ -139,8 +140,10 @@ class Service:
             C.check_passphrase(passphrase)
             if passphrase == admin_password:
                 raise C.CAError("Use a different passphrase for the CA key than for the admin login.")
-            names = C.parse_names(ui_names)
-            host = C.parse_names(public_host).all()[0] if public_host.strip() else names.all()[0]
+            org = org.strip() or self.net().org
+            names = C.parse_names(ui_names if ui_names.strip() else self.initial_names())
+            host = public_host.strip() or self.default_public_host()[0] or names.all()[0]
+            host = C.parse_names(host).all()[0]
             self.ca.create(org=org, key_type=key_type, passphrase=passphrase, root_years=root_years,
                            int_years=int_years, seal=seal, permitted=permitted, public_host=host)
             self.issue_ui_cert(names)
@@ -155,6 +158,17 @@ class Service:
                 pass
             self._setup_done = True
             self.notify_tls_changed()
+
+    def auto_setup(self) -> bool:
+        """Set the CA up from CERTFORGE_* settings, with no one at the keyboard. True if it did."""
+        a = self.cfg.auto
+        if a is None or self.is_setup():
+            return False
+        self.setup(token=self.setup_token(), org=a.org, admin_password=a.admin_password,
+                   admin_password2=a.admin_password, passphrase=a.passphrase, key_type=a.key_type,
+                   root_years=a.root_years, int_years=a.int_years, seal=a.seal, permitted=a.permitted,
+                   ui_names="", public_host=a.public_host)
+        return True
 
     def notify_tls_changed(self) -> None:
         """The HTTPS listener picks up the new certificate for new connections (no restart needed)."""
@@ -213,11 +227,35 @@ class Service:
             if cert is not None and cert.not_valid_after_utc > C._now():
                 return str(crt), str(key), "ca"
         names = C.parse_names(self.initial_names())
-        crt_pem, key_pem = C.self_signed_bootstrap(names)
         crt, key = self.cfg.data / "ui" / "bootstrap.crt", self.cfg.data / "ui" / "bootstrap.key"
+        self._bootstrap_names = names.all()
+        if self._bootstrap_reusable(crt, key, names):
+            return str(crt), str(key), "bootstrap"
+        crt_pem, key_pem = C.self_signed_bootstrap(names)
         C.atomic_write(key, key_pem, 0o600)
         C.atomic_write(crt, crt_pem, 0o644)
         return str(crt), str(key), "bootstrap"
+
+    @staticmethod
+    def _bootstrap_reusable(crt: Path, key: Path, names: C.Names) -> bool:
+        """Keep the existing temporary certificate while it still covers exactly these names."""
+        try:
+            if not (crt.exists() and key.exists()):
+                return False
+            cert = x509.load_pem_x509_certificate(crt.read_bytes())
+            return (cert.not_valid_after_utc - C._now() > timedelta(days=7)
+                    and set(C.sans_of(cert)) == set(names.all()))
+        except (OSError, ValueError):
+            return False
+
+    def bootstrap_stale(self) -> bool:
+        """Before setup: has the network changed (new DHCP address, new name) since the temporary certificate was made?"""
+        if self.is_setup():
+            return False
+        if set(C.parse_names(self.initial_names()).all()) != set(self._bootstrap_names):
+            return True
+        crt = self.cfg.data / "ui" / "bootstrap.crt"          # the temporary certificate only lasts 30 days
+        return not self._bootstrap_reusable(crt, crt.with_suffix(".key"), C.parse_names(self.initial_names()))
 
     def allowed_hosts(self) -> list[str]:
         hosts = list(self.store.get("ui_names", []))

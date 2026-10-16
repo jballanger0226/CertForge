@@ -6,19 +6,22 @@
 
 {% if error %}<p class="note error" role="alert">{{ error }}</p>{% endif %}
 
+{% if detected and detected.names %}
+<div class="note info" id="detected">
+  <strong>CertForge looked at the network and filled in the rest.</strong>
+  This server is {% for n in detected.names[:3] %}<code>{{ n }}</code>{{ ', ' if not loop.last }}{% endfor %}{% if detected.names|length > 3 %} and {{ detected.names|length - 3 }} more{% endif %}.
+  Certificates will point clients to <code>{{ detected.public_host }}</code> for CA downloads. All you need to choose is the two passwords below. Open “Detected settings” if something looks wrong.
+</div>
+{% if detected.note %}<p class="note warn" role="note">{{ detected.note }}</p>{% endif %}
+{% endif %}
+
 <form method="post" action="/setup" class="narrow" data-busy="Creating your CA, this can take a few seconds...">
   <input type="hidden" name="csrf_token" value="{{ csrf }}">
 
   <section>
     <h2>Prove it's you</h2>
-    <label for="token">Setup code <small>Printed in the server log when CertForge started. In Docker, run <code>docker logs certforge</code>.</small></label>
+    <label for="token">Setup code <small>Printed in the server log when CertForge started. In Docker, run <code>docker logs certforge</code>. On a Proxmox container or VM, run <code>certforge-code</code>.</small></label>
     <input id="token" name="token" required autocomplete="off" autocapitalize="none" spellcheck="false" class="mono">
-  </section>
-
-  <section>
-    <h2>Name your CA</h2>
-    <label for="org">Organization or home name <small>It appears in your certificates, for example "Home Lab". It can't be changed later.</small></label>
-    <input id="org" name="org" required maxlength="40" value="{{ f.org }}" autocomplete="organization">
   </section>
 
   <section>
@@ -39,13 +42,17 @@
       <span>Ask for the passphrase after every restart. More secure, because a stolen disk or backup can't sign anything. Until someone unlocks it, the server can't issue or revoke certificates.</span></label>
   </section>
 
-  <section>
-    <h2>How will people reach this server?</h2>
+  <details class="opts"{% if error %} open{% endif %}>
+    <summary>Detected settings: name, addresses</summary>
+    <h3>Name your CA</h3>
+    <label for="org">Organization or home name <small>It appears in your certificates, for example "Home Lab". It can't be changed later.</small></label>
+    <input id="org" name="org" maxlength="40" value="{{ f.org }}" autocomplete="organization">
+    <h3>How will people reach this server?</h3>
     <label for="ui_names">Names and addresses <small>Everything you might type into a browser to reach this page. One per line.</small></label>
-    <textarea id="ui_names" name="ui_names" required autocomplete="off" autocapitalize="none" spellcheck="false">{{ f.ui_names }}</textarea>
-    <label for="public_host">Address for CA downloads and revocation checks <small>Optional. Defaults to the first name above. It's written into the certificates you issue, so pick a name that won't change.</small></label>
+    <textarea id="ui_names" name="ui_names" autocomplete="off" autocapitalize="none" spellcheck="false">{{ f.ui_names }}</textarea>
+    <label for="public_host">Address for CA downloads and revocation checks <small>Filled in from the network. It's written into the certificates you issue, so pick a name that won't change.</small></label>
     <input id="public_host" name="public_host" value="{{ f.public_host }}" autocomplete="off" autocapitalize="none" spellcheck="false">
-  </section>
+  </details>
 
   <details class="opts">
     <summary>Advanced</summary>

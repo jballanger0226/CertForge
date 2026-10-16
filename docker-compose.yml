@@ -8,8 +8,14 @@ services:
       - "443:443"
       - "80:80"          # serves the CA files and revocation list to clients; redirects everything else to 443
     environment:
-      # Names and addresses people will use to reach this server (comma separated).
+      # Names and addresses people will use to reach this server (comma separated). Inside a container
+      # CertForge can't see your network's names, so set this one.
       CERTFORGE_HOSTNAMES: "certforge.lan,localhost"
+      # Zero-touch setup (optional): with both set, the CA is created on first start and there is no wizard.
+      # Prefer secrets over plain values (see below).
+      # CERTFORGE_ADMIN_PASSWORD_FILE: /run/secrets/certforge_admin
+      # CERTFORGE_CA_PASSPHRASE_FILE: /run/secrets/certforge_ca
+      # CERTFORGE_ORG: "Home Lab"
       # Optional: choose your own first-run setup token instead of reading it from `docker logs certforge`.
       # CERTFORGE_SETUP_TOKEN: "change-me"
     volumes:
@@ -20,6 +26,11 @@ services:
     security_opt: ["no-new-privileges:true"]
     read_only: true
     tmpfs: ["/tmp"]
+
+# secrets:                               # for zero-touch setup
+#   certforge_admin: {file: ./secrets/admin_password.txt}
+#   certforge_ca: {file: ./secrets/ca_passphrase.txt}
+# ...and under the service:  secrets: [certforge_admin, certforge_ca]
 
 volumes:
   certforge-data:

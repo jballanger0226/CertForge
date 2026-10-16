@@ -44,7 +44,14 @@ install -m 755 "$SRC/deploy/ct/certforge-code" "$ROOT/usr/local/bin/certforge-co
 install -m 644 "$SRC/deploy/ct/motd" "$ROOT/etc/motd"
 install -d "$ROOT/etc/systemd/network"
 install -m 644 "$SRC/deploy/ct/network-fallback.network" "$ROOT/etc/systemd/network/zz-dhcp-fallback.network"
-printf '# CERTFORGE_HOSTNAMES=certforge.lan,10.0.0.5   # names for the first web certificate (auto-detected if unset)\n' > "$ROOT/etc/certforge.env"
+cat > "$ROOT/etc/certforge.env" <<'ENV'
+# Names for the first web certificate. Auto-detected from DHCP and DNS if unset.
+# CERTFORGE_HOSTNAMES=certforge.lan,10.0.0.5
+# Zero-touch setup: set both and the CA is created on the next start, with no wizard.
+# CERTFORGE_ADMIN_PASSWORD=
+# CERTFORGE_CA_PASSPHRASE=
+ENV
+chmod 600 "$ROOT/etc/certforge.env"
 echo certforge > "$ROOT/etc/hostname"
 printf '%s\n' "$VERSION" > "$ROOT/opt/certforge/VERSION"
 

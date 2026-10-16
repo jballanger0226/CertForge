@@ -40,7 +40,7 @@ Each tagged release (`v*`) has a `certforge_<version>_amd64.tar.zst` Debian cont
 2. Create a container from it (*Create CT > Template*). 1 core, 512 MB RAM and 2 GB disk are plenty. An unprivileged container is fine.
 3. Start it and open `https://<container IP or name>/`. Get the setup code from the console with `certforge-code`.
 
-Back up `/var/lib/certforge` inside the container (or use Proxmox backups). Settings live in `/etc/certforge.env`. The template is built on Debian 13, so you need a Proxmox VE release that supports it.
+Back up `/var/lib/certforge` inside the container (or use Proxmox backups). Settings live in `/etc/certforge.env`, including the optional zero-touch setup values. The template is built on Debian 13, so you need a Proxmox VE release that supports it.
 
 ## Running it without a container or service manager
 
@@ -54,11 +54,41 @@ CERTFORGE_DATA=./data sudo -E python -m app.server     # or give python CAP_NET_
 | Variable | Default | Meaning |
 |---|---|---|
 | `CERTFORGE_DATA` | `/data` | Where the CA and database live. **Back this up.** |
-| `CERTFORGE_HOSTNAMES` | | Names/IPs for the web page's first certificate |
+| `CERTFORGE_HOSTNAMES` | detected | Names/IPs for the web page's first certificate. Set it in Docker, where CertForge can't see your network |
 | `CERTFORGE_HTTPS_PORT` | `443` | |
 | `CERTFORGE_HTTP_PORT` | `80` | `0` turns the plain-HTTP helper off |
 | `CERTFORGE_BIND` | `0.0.0.0` | |
 | `CERTFORGE_SETUP_TOKEN` | random | Pick your own first-run setup code |
+| `CERTFORGE_ADMIN_PASSWORD` / `_FILE` | | Zero-touch setup: admin password (12+ characters) |
+| `CERTFORGE_CA_PASSPHRASE` / `_FILE` | | Zero-touch setup: CA passphrase (12+ characters, different from the password) |
+| `CERTFORGE_ORG` | from the domain | Zero-touch setup: CA name |
+| `CERTFORGE_SEAL` | `false` | Zero-touch setup: ask for the passphrase after every restart |
+| `CERTFORGE_PUBLIC_HOST` | detected | Zero-touch setup: address written into certificates for CA downloads and revocation checks |
+| `CERTFORGE_KEY_TYPE`, `CERTFORGE_ROOT_YEARS`, `CERTFORGE_INT_YEARS`, `CERTFORGE_PERMITTED` | `ec-p384`, 20, 10, none | Zero-touch setup: same as the wizard's Advanced section |
+
+## What CertForge works out for itself
+
+On a VM or Proxmox container with DHCP, CertForge reads the host name, the DHCP search domain and the interface addresses, and pre-fills the setup page:
+
+- **Names for the web certificate:** `host.domain`, the short host name and the IP addresses (not `localhost`). If you open the page by some other name, that is added too.
+- **Address for CA downloads and revocation checks:** the name you used to reach the page, or `host.domain` if DNS knows it. If it isn't in DNS yet, CertForge uses the IP address and warns that DHCP can change it.
+- **CA name:** suggested from the domain (`lab.example.com` becomes "Example").
+- Until setup is finished, the temporary certificate follows DHCP: a new address or name is picked up within a minute.
+
+So the wizard is just the setup code and two passwords; **Detected settings** is there if something looks wrong. In Docker the container can't see your network's names, so set `CERTFORGE_HOSTNAMES`.
+
+## Zero-touch setup
+
+To create the CA with nobody at the keyboard (templates, Ansible, cloud-init, Compose), set both secrets:
+
+```bash
+CERTFORGE_ADMIN_PASSWORD_FILE=/run/secrets/admin   # or CERTFORGE_ADMIN_PASSWORD
+CERTFORGE_CA_PASSPHRASE_FILE=/run/secrets/ca       # or CERTFORGE_CA_PASSPHRASE
+```
+
+On the first start the CA is created from those and the detected names, and the web page is already using its CA-issued certificate. Nothing is written to the log except that it happened. There is no setup page for anyone else to find. Afterwards the secrets are no longer needed: remove them from the environment. Bad values (too short, same password and passphrase) stop the server with a clear message.
+
+CertForge never generates and stores these secrets itself. Keeping the CA passphrase in a file next to the encrypted key would defeat the encryption. With `CERTFORGE_SEAL=true` the passphrase is still asked for after every restart.
 
 ## How your keys are protected
 

@@ -236,13 +236,20 @@ def create_app(svc: Service) -> Starlette:
         return render(request, "trust.html", ca=svc.ca_summary(), slug=C.slugify(svc.ca.meta["org"]))
 
     # ---- setup / login ----------------------------------------------------------
+    def setup_defaults(host: str) -> tuple[dict, dict]:
+        """Values the setup form starts with, worked out from the network (runs DNS lookups, so off the event loop)."""
+        info = svc.net(host)
+        public_host, note = svc.default_public_host(host)
+        names = svc.initial_names(host)
+        f = {"ui_names": names, "key_type": "ec-p384", "root_years": 20, "int_years": 10, "org": info.org,
+             "permitted": "", "public_host": public_host, "seal": ""}
+        return f, {"note": note, "domain": info.domain, "names": names.splitlines(), "public_host": public_host}
+
     async def setup_get(request):
         if svc.is_setup():
             return go("/")
-        return render(request, "setup.html", f={"ui_names": svc.initial_names(request_host(request)),
-                                                 "key_type": "ec-p384", "root_years": 20, "int_years": 10,
-                                                 "org": "", "permitted": "", "public_host": "", "seal": ""},
-                      error=None)
+        f, detected = await run_in_threadpool(setup_defaults, request_host(request))
+        return render(request, "setup.html", f=f, detected=detected, error=None)
 
     async def setup_post(request):
         if svc.is_setup():
@@ -260,7 +267,9 @@ def create_app(svc: Service) -> Starlette:
                 int_years=f["int_years"], seal=bool(f["seal"]), permitted=f["permitted"],
                 ui_names=f["ui_names"], public_host=f["public_host"])
         except C.CAError as e:
-            return render(request, "setup.html", status=400, f=f, error=str(e))
+            _, detected = await run_in_threadpool(setup_defaults, request_host(request))
+            detected["public_host"], detected["names"] = f["public_host"], f["ui_names"].splitlines()
+            return render(request, "setup.html", status=400, f=f, detected=detected, error=str(e))
         request.session.clear()
         request.session.update(uid="admin", pwv=svc.password_version(), csrf=secrets.token_urlsafe(24), sid=secrets.token_urlsafe(12))
         return render(request, "setup_done.html", ca=svc.ca_summary(), slug=C.slugify(svc.ca.meta["org"]))
