@@ -18,7 +18,7 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -39,7 +39,7 @@ jobs:
     name: Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -63,7 +63,7 @@ jobs:
     name: Dependency audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -73,7 +73,7 @@ jobs:
     name: Docker image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build
         run: docker build --build-arg VERSION=0.0.0-ci --build-arg REVISION=${GITHUB_SHA} -t certforge:ci .
       - name: Run with the same restrictions as docker-compose.yml
@@ -116,7 +116,7 @@ jobs:
       ACME_CA_PASS: ci-acme-issuing-passphrase-789
       ACME_ROOT_PASS: ci-acme-root-passphrase-012
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build the image
         run: docker build --build-arg VERSION=0.0.0-ci --build-arg REVISION=${GITHUB_SHA} -t certforge:ci .
       - name: Names (certforge.test is this machine; app.certforge.test is the machine asking for a certificate)
