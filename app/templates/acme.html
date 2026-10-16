@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% block title %}ACME – {{ org }}{% endblock %}
+{% block content %}
+<h1>ACME</h1>
+<p class="lede">Let servers get and renew their own certificates. Point certbot, acme.sh, Caddy, Traefik, Proxmox or any other ACME client at this address and nobody has to remake certificates by hand.</p>
+
+{% set st = ov.settings %}
+<section>
+  <h2>Address for ACME clients</h2>
+  <div class="cmdrow"><pre class="cmd" id="acme-url">{{ acme_url }}</pre><button type="button" class="btn quiet small" data-copy="#acme-url">Copy</button></div>
+  <p class="small">{% if st.enabled %}<span class="status valid">On</span>{% else %}<span class="status expired">Off</span>{% endif %}
+    Clients have to trust your root CA first (see <a href="/trust">the trust page</a>), because they reach this address over HTTPS.</p>
+</section>
+
+<section>
+  <h2>Settings</h2>
+  <form method="post" action="/acme/settings" class="narrow">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label class="check"><input type="checkbox" name="enabled" value="1"{% if st.enabled %} checked{% endif %}>
+      <span>Turn the ACME server on</span></label>
+
+    <label for="domains">Domains clients may request <small>One per line. A domain covers itself and everything under it: <code>lab.example.com</code> allows <code>nas.lab.example.com</code>. No wildcards.</small></label>
+    <textarea id="domains" name="domains" autocomplete="off" autocapitalize="none" spellcheck="false">{{ st.domains|join('\n') }}</textarea>
+
+    <label for="networks">IP ranges clients may request <small>Optional, for certificates on IP addresses. Example: <code>192.168.1.0/24</code></small></label>
+    <textarea id="networks" name="networks" autocomplete="off" autocapitalize="none" spellcheck="false">{{ st.networks|join('\n') }}</textarea>
+
+    <label for="days">Certificate lifetime, in days <small>Short is good, because clients renew automatically. 90 is a common choice.</small></label>
+    <input id="days" name="days" type="number" min="1" max="{{ MAX_DAYS }}" value="{{ st.days }}">
+
+    <label class="check"><input type="checkbox" name="require_eab" value="1"{% if st.require_eab %} checked{% endif %}>
+      <span>Require an account key to register. Only machines you hand a key to can then get certificates.</span></label>
+    <div class="actions"><button class="btn" type="submit">Save</button></div>
+  </form>
+  <p class="note info mt">How it's checked: a client proves it controls a name by serving a token over plain HTTP on port 80 of that name. Anyone who controls an allowed host can therefore get a certificate for it, so only allow names you'd trust that to. The CA's own name limits still apply on top.</p>
+</section>
+
+<section>
+  <h2>Account keys</h2>
+  <p>Hand one to each machine or person that should be allowed to register. Each key works once.</p>
+  <form method="post" action="/acme/eab" class="narrow">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label for="label">What is it for? <small>A note for you, such as "proxmox node 1".</small></label>
+    <input id="label" name="label" maxlength="60" autocomplete="off">
+    <div class="actions"><button class="btn quiet" type="submit">Create an account key</button></div>
+  </form>
+  {% if ov.eab %}
+  <div class="table-wrap mt"><table>
+    <thead><tr><th>Key id</th><th>Note</th><th>Created</th><th>Status</th><th></th></tr></thead>
+    <tbody>
+    {% for k in ov.eab %}
+      <tr><td class="hex">{{ k.kid }}</td><td>{{ k.label }}</td><td>{{ k.created|date }}</td>
+        <td>{% if k.revoked %}Revoked{% elif k.account %}Used{% else %}Not used yet{% endif %}</td>
+        <td>{% if not k.revoked %}<form method="post" action="/acme/eab/{{ k.kid }}/revoke"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="btn quiet small" type="submit">Revoke</button></form>{% endif %}</td></tr>
+    {% endfor %}
+    </tbody></table></div>
+  {% endif %}
+</section>
+
+<section>
+  <h2>Set up a client</h2>
+  <p>Replace <code>app.lab.example.com</code> with the name the client should get a certificate for. Each client needs your root certificate (<code>root.crt</code>, from <a href="/pki/root.crt">the trust page</a>) so it can trust this address.</p>
+  <details class="opts"><summary>certbot</summary>
+    <pre class="cmd">REQUESTS_CA_BUNDLE=/path/to/root.crt certbot certonly --standalone \
+  --server {{ acme_url }} \
+  -d app.lab.example.com --register-unsafely-without-email --agree-tos{% if st.require_eab %} \
+  --eab-kid KEY_ID --eab-hmac-key HMAC_KEY{% endif %}</pre>
+    <p class="small">certbot renews on its own after that (a timer or cron job comes with it).</p></details>
+  <details class="opts"><summary>acme.sh</summary>
+    <pre class="cmd">acme.sh --issue --standalone -d app.lab.example.com \
+  --server {{ acme_url }} --ca-bundle /path/to/root.crt{% if st.require_eab %} \
+  --eab-kid KEY_ID --eab-hmac-key HMAC_KEY{% endif %}</pre></details>
+  <details class="opts"><summary>lego</summary>
+    <pre class="cmd">LEGO_CA_CERTIFICATES=/path/to/root.crt lego --server {{ acme_url }} \
+  --accept-tos --email you@example.com --http -d app.lab.example.com{% if st.require_eab %} \
+  --eab --kid KEY_ID --hmac HMAC_KEY{% endif %} run</pre></details>
+  <details class="opts"><summary>Caddy</summary>
+    <pre class="cmd">{
+  acme_ca {{ acme_url }}
+  acme_ca_root /path/to/root.crt{% if st.require_eab %}
+  acme_eab {
+    key_id KEY_ID
+    mac_key HMAC_KEY
+  }{% endif %}
+}</pre></details>
+  <details class="opts"><summary>Traefik</summary>
+    <pre class="cmd">certificatesResolvers:
+  certforge:
+    acme:
+      caServer: {{ acme_url }}
+      email: you@example.com
+      storage: /acme.json
+      httpChallenge:
+        entryPoint: web{% if st.require_eab %}
+      eab:
+        kid: KEY_ID
+        hmacEncoded: HMAC_KEY{% endif %}</pre>
+    <p class="small">Start Traefik with <code>LEGO_CA_CERTIFICATES=/path/to/root.crt</code> in its environment.</p></details>
+  <details class="opts"><summary>Proxmox VE</summary>
+    <p>Add the root certificate to each node's trust store first (<code>cp root.crt /usr/local/share/ca-certificates/ &amp;&amp; update-ca-certificates</code>). Then, under <em>Datacenter &gt; ACME</em>, add an account with the custom directory <code>{{ acme_url }}</code>{% if st.require_eab %} and your account key{% endif %}, and order the certificate from the node's <em>System &gt; Certificates</em> page using the standalone (HTTP) challenge. The node's name must be in your allowed domains.</p></details>
+</section>
+
+{% if ov.accounts %}
+<section>
+  <h2>Registered clients</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Account</th><th>Contact</th><th>Registered</th><th>Certificates</th><th>Status</th><th></th></tr></thead>
+    <tbody>
+    {% for a in ov.accounts %}
+      <tr><td class="hex">{{ a.id }}</td><td>{{ (a.contact|fromjson)|join(', ') or '–' }}</td><td>{{ a.created|date }}</td><td>{{ a.issued }}</td><td>{{ a.status|capitalize }}</td>
+        <td>{% if a.status == 'valid' %}<form method="post" action="/acme/accounts/{{ a.id }}/deactivate"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="btn quiet small" type="submit">Deactivate</button></form>{% endif %}</td></tr>
+    {% endfor %}
+    </tbody></table></div>
+</section>
+{% endif %}
+
+{% if ov.recent %}
+<section>
+  <h2>Recent requests</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>When</th><th>Names</th><th>Result</th></tr></thead>
+    <tbody>
+    {% for o in ov.recent %}
+      <tr><td class="small">{{ o.created|datetime }}</td>
+        <td>{% for i in (o.identifiers|fromjson) %}{{ i.value }}{{ ', ' if not loop.last }}{% endfor %}</td>
+        <td>{% if o.status == 'valid' and o.serial %}<a href="/certs/{{ o.serial }}">Issued</a>{% else %}{{ o.status|capitalize }}{% endif %}</td></tr>
+    {% endfor %}
+    </tbody></table></div>
+</section>
+{% endif %}
+{% endblock %}

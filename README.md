@@ -9,6 +9,7 @@ A small private certificate authority with a web page on port 443. Type a name, 
   - **Make one for me**: you give names or IP addresses, you get a `.p12` (key + cert + chain, with a password) or a PEM `.zip` for nginx, Apache and the like.
   - **Sign my request**: paste or upload a CSR, you get a `.cer`, `.der`, full-chain `.pem` or `.p7b`.
 - A public **Trust page** (`/trust`) hands out the root and intermediate certificates and shows how to trust them on Windows, macOS, iOS (profile), Android, Linux and Firefox.
+- An **ACME server** (the protocol behind Let's Encrypt), so certbot, acme.sh, lego, Caddy, Traefik and Proxmox can get and renew their own certificates.
 - Revocation with a CRL, certificates are listed with expiry warnings, and the web page's own certificate renews itself.
 
 ## Run it with Docker
@@ -64,6 +65,8 @@ CERTFORGE_DATA=./data sudo -E python -m app.server     # or give python CAP_NET_
 | `CERTFORGE_ORG` | from the domain | Zero-touch setup: CA name |
 | `CERTFORGE_SEAL` | `false` | Zero-touch setup: ask for the passphrase after every restart |
 | `CERTFORGE_PUBLIC_HOST` | detected | Zero-touch setup: address written into certificates for CA downloads and revocation checks |
+| `CERTFORGE_ACME_DOMAINS`, `CERTFORGE_ACME_NETWORKS` | | Zero-touch setup: turn the ACME server on for these domains and IP ranges |
+| `CERTFORGE_ACME_DAYS`, `CERTFORGE_ACME_EAB` | `90`, `false` | Zero-touch setup: ACME certificate lifetime; require an account key |
 | `CERTFORGE_KEY_TYPE`, `CERTFORGE_ROOT_YEARS`, `CERTFORGE_INT_YEARS`, `CERTFORGE_PERMITTED` | `ec-p384`, 20, 10, none | Zero-touch setup: same as the wizard's Advanced section |
 
 ## What CertForge works out for itself
@@ -90,6 +93,17 @@ On the first start the CA is created from those and the detected names, and the 
 
 CertForge never generates and stores these secrets itself. Keeping the CA passphrase in a file next to the encrypted key would defeat the encryption. With `CERTFORGE_SEAL=true` the passphrase is still asked for after every restart.
 
+## ACME: certificates that renew themselves
+
+Turn it on from the **ACME** page (or `CERTFORGE_ACME_DOMAINS` for zero-touch setup). Clients use `https://<your server>/acme/directory`. The page has ready-to-copy settings for certbot, acme.sh, lego, Caddy, Traefik and Proxmox VE.
+
+- **What it supports:** the standard protocol (RFC 8555) with the HTTP-01 challenge, for DNS names and IP addresses (RFC 8738). Wildcards need DNS-01, which isn't offered. Certificates last 90 days by default and are server-auth only.
+- **Who can get what:** only names inside the domains and IP ranges you list, on top of any name limits on the CA itself. A client proves it controls a name by serving a token on port 80 of that name, so anyone who controls an allowed host can get a certificate for it. Turn on **account keys** to also restrict who may register: each key is created on the page, shown once, and works once.
+- **Safe validation:** CertForge only fetches `http://<name>/.well-known/acme-challenge/<token>` on port 80, never follows redirects, caps the response size, and refuses to connect to loopback, link-local (including cloud metadata addresses), multicast or other unusable addresses. Rate limits apply to registrations and orders.
+- **Clients must trust your root CA** first, because the directory is served over HTTPS. The root is on the trust page.
+- **The CA must be unlocked:** with "ask for the passphrase after every restart", issuing and revoking over ACME waits until someone unlocks it.
+- Clients can revoke their own certificates over ACME, and the revocation list is updated at once.
+
 ## How your keys are protected
 
 - CA private keys are stored encrypted (PKCS#8, AES-256, PBKDF2 with 600,000 rounds) under the **CA passphrase** you choose at setup. The passphrase is never stored.
@@ -114,7 +128,7 @@ Back up the whole `CERTFORGE_DATA` folder (the `certforge-data` volume in Docker
 
 ## Checks that run on GitHub
 
-Every push and pull request runs: Python and shell lint, Dockerfile and compose validation, the engine and end-to-end tests, a dependency vulnerability audit, and a Docker build that starts the container with the same restrictions as `docker-compose.yml` and checks it is healthy, not running as root, and redirects port 80 to 443. Pull requests that touch the app or `deploy/ct/` also build the Proxmox template and boot it to confirm CertForge answers. Dependabot keeps pip, Docker and Actions versions current.
+Every push and pull request runs: Python and shell lint, Dockerfile and compose validation, the engine, ACME and end-to-end tests, real **certbot** and **lego** clients getting, renewing and revoking certificates from a CertForge container, a dependency vulnerability audit, and a Docker build that starts the container with the same restrictions as `docker-compose.yml` and checks it is healthy, not running as root, and redirects port 80 to 443. Pull requests that touch the app or `deploy/ct/` also build the Proxmox template and boot it to confirm CertForge answers. Dependabot keeps pip, Docker and Actions versions current.
 
 ## Tests
 

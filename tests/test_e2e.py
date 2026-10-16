@@ -24,7 +24,7 @@ from pathlib import Path
 
 import requests
 from cryptography import x509
-from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import hashes, serialization
 
 # `requests` lets these environment variables override Session.verify, which would silently check
 # our server against some other CA bundle. These tests pin the CA they mean to trust, so drop them.
@@ -694,6 +694,149 @@ class TestBadHeadlessSettingsFailLoudly(unittest.TestCase):
             p = subprocess.run([sys.executable, "-m", "app.server"], cwd=ROOT, env=env, capture_output=True, text=True, timeout=60)
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("Automatic setup failed", p.stderr + p.stdout)
+
+
+class TestAcmeOverHttps(Base):
+    """The ACME server on the real HTTPS listener, with a real port-80 challenge server and a real client."""
+
+    PORT = 8447
+
+    @classmethod
+    def setUpClass(cls):
+        from app import netinfo
+        ips = netinfo.local_ips()
+        if not ips:
+            raise unittest.SkipTest("no non-loopback address to validate against")
+        cls.ip = ips[0]
+        cls.boot(https=cls.PORT, http=0, token=None, verify_with_root=True, env={
+            "CERTFORGE_ADMIN_PASSWORD": ADMIN, "CERTFORGE_CA_PASSPHRASE": PASS, "CERTFORGE_ORG": "Acme Lab",
+            "CERTFORGE_ACME_NETWORKS": f"{cls.ip}/32", "CERTFORGE_ACME_DAYS": "45"})
+
+    def challenge_server(self, client):
+        """Serves the key authorization for any token on port 80 of our address, like certbot --standalone does."""
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        seen = []
+
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                token = self.path.rsplit("/", 1)[-1]
+                seen.append((self.path, self.headers.get("Host")))
+                body = client.key_authorization(token).encode()
+                self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        import threading
+        srv = HTTPServer((self.ip, 80), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        return seen
+
+    def new_client(self):
+        from tests.acme_client import Client, Http
+        s = requests.Session(); s.verify = str(self.root)
+        c = Client(Http(s), self.base, "ES256")
+        self.assertEqual(c.new_account(["mailto:ops@lab.test"]).status, 201)
+        return c, s
+
+    def test_zero_touch_turned_acme_on_and_the_directory_is_public(self):
+        d = requests.get(f"{self.base}/acme/directory", verify=str(self.root))
+        self.assertEqual(d.status_code, 200)
+        self.assertEqual(d.json()["newOrder"], f"{self.base}/acme/new-order")
+        self.assertEqual(d.headers["Cache-Control"], "no-store")
+        for h, want in (("evil.example", 400), ("localhost", 200)):
+            r = requests.get(f"{self.base}/acme/directory", verify=str(self.root), headers={"Host": h})
+            self.assertEqual(r.status_code, want, h)
+        r = requests.post(f"{self.base}/acme/new-order", data=b"{}", verify=str(self.root), headers={"Content-Type": "application/json"})
+        self.assertEqual(r.status_code, 415)
+        self.assertEqual(requests.get(f"{self.base}/acme/new-order", verify=str(self.root)).status_code, 405)
+
+    def test_certificate_for_an_ip_then_revoke_then_manage_in_the_web_page(self):
+        from tests.acme_client import make_csr
+        c, s = self.new_client()
+        seen = self.challenge_server(c)
+        r = c.new_order([{"type": "ip", "value": self.ip}])
+        self.assertEqual(r.status, 201, r.body)
+        url = r.headers["location"]
+        order = c.poll(url).json()
+        z = c.poll(order["authorizations"][0]).json()
+        self.assertEqual(c.poke(z["challenges"][0]["url"]).status, 200)
+        end = time.time() + 15
+        while time.time() < end and c.poll(url).json()["status"] not in ("ready", "invalid"):
+            time.sleep(0.2)
+        order = c.poll(url).json()
+        self.assertEqual(order["status"], "ready", order)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0][0], f"/.well-known/acme-challenge/{z['challenges'][0]['token']}")
+        self.assertEqual(seen[0][1], self.ip)
+
+        csr, key = make_csr([self.ip])
+        order = c.finalize(order, csr).json()
+        self.assertEqual(order["status"], "valid")
+        chain = c.post(order["certificate"], None).body
+        certs = x509.load_pem_x509_certificates(chain)
+        self.assertEqual(len(certs), 2)
+        leaf = certs[0]
+        self.assertTrue(44 <= (leaf.not_valid_after_utc - leaf.not_valid_before_utc).days <= 46)     # CERTFORGE_ACME_DAYS=45
+        inter = self.tmpfile("inter.pem", certs[1].public_bytes(serialization.Encoding.PEM))
+        leaf_pem = self.tmpfile("leaf.pem", certs[0].public_bytes(serialization.Encoding.PEM))
+        sh("openssl", "verify", "-CAfile", str(self.root), "-untrusted", inter, "-purpose", "sslserver", "-verify_ip", self.ip, leaf_pem)
+
+        # the web page lists it and shows the ACME page
+        w = self.login()
+        listing = T(w.get(f"{self.base}/certs"))
+        self.assertIn("ACME client", listing)
+        page = T(w.get(f"{self.base}/acme"))
+        self.assertIn(f"{self.base}/acme/directory", page)
+        self.assertIn(self.ip, page)
+        self.assertIn("Issued", page)
+        self.assertEqual(w.get(f"{self.base}/acme/directory").status_code, 200)
+
+        # revoke over ACME; the web page agrees
+        self.assertEqual(c.revoke(certs[0].public_bytes(serialization.Encoding.DER), reason=4).status, 200)
+        serial = f"{leaf.serial_number:X}"
+        serial = serial if len(serial) % 2 == 0 else "0" + serial
+        self.assertIn("Revoked", re.search(r'<dl class="facts">.*?</dl>', w.get(f"{self.base}/certs/{serial}").text, re.S).group(0))
+
+    def test_admin_page_actions(self):
+        w = self.login()
+        self.assertEqual(w.get(f"{self.base}/acme", allow_redirects=False).status_code, 200)
+        anon = requests.get(f"{self.base}/acme", verify=str(self.root), allow_redirects=False)
+        self.assertEqual((anon.status_code, anon.headers["Location"].startswith("/login")), (303, True))
+        anon = requests.post(f"{self.base}/acme/settings", data={"enabled": "1"}, verify=str(self.root), allow_redirects=False)
+        self.assertEqual(anon.status_code, 303)
+
+        # bad settings are explained, nothing changes
+        r = self.post(w, "/acme/settings", data=dict(enabled="1", domains="*.lab.test", networks="", days="30"))
+        self.assertIn("wildcards", T(w.get(f"{self.base}/acme")))
+        # require an account key; registering without one fails, with one works
+        self.post(w, "/acme/settings", data=dict(enabled="1", domains="lab.test", networks=f"{self.ip}/32", days="45", require_eab="1"))
+        from tests.acme_client import Client, Http
+        sess = requests.Session(); sess.verify = str(self.root)
+        c = Client(Http(sess), self.base)
+        self.assertEqual(c.new_account().problem, "externalAccountRequired")
+        self.post(w, "/acme/eab", data=dict(label="e2e laptop"))
+        flash = T(w.get(f"{self.base}/acme"))
+        m = re.search(r"Key id: (\S+)\s+HMAC key: (\S+)", flash)
+        self.assertTrue(m, flash[:2000])
+        kid, key = m.group(1), m.group(2)
+        self.assertEqual(c.new_account(eab=(kid, key)).status, 201)
+        page = T(w.get(f"{self.base}/acme"))
+        self.assertIn("e2e laptop", page)
+        self.assertIn("Used", page)
+        # deactivate the account from the page
+        acct_id = c.kid.rsplit("/", 1)[1]
+        self.assertEqual(self.post(w, f"/acme/accounts/{acct_id}/deactivate", data={}).status_code, 303)
+        self.assertEqual(c.new_order([{"type": "ip", "value": self.ip}]).status, 403)
+        # a revoked key can't be used
+        self.post(w, f"/acme/eab/{kid}/revoke", data={})
+        # switch it all off again
+        self.post(w, "/acme/settings", data=dict(domains="lab.test", networks=f"{self.ip}/32", days="45"))
+        self.assertEqual(requests.get(f"{self.base}/acme/directory", verify=str(self.root)).status_code, 404)
+        self.post(w, "/acme/settings", data=dict(enabled="1", domains="lab.test", networks=f"{self.ip}/32", days="45"))
+        self.assertEqual(requests.get(f"{self.base}/acme/directory", verify=str(self.root)).status_code, 200)
 
 
 if __name__ == "__main__":

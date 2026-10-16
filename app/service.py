@@ -18,6 +18,7 @@ from cryptography.hazmat.primitives import serialization
 
 from . import ca as C
 from . import netinfo
+from .acme import Acme
 from .config import Config
 from .security import MIN_PASSWORD, Ephemeral, RateLimiter, hash_password, random_password, verify_password
 from .store import Store, iso, parse_iso, utcnow
@@ -62,6 +63,7 @@ class Service:
         self.tls_changed = threading.Event()   # set when the web certificate on disk changed
         self._setup_lock = threading.Lock()
         self._setup_done = False
+        self.acme = Acme(self)
         self._net_cache: dict[str, tuple[float, netinfo.NetInfo]] = {}
         self._bootstrap_names: list[str] = []
         self.secret = self._secret()
@@ -168,6 +170,9 @@ class Service:
                    admin_password2=a.admin_password, passphrase=a.passphrase, key_type=a.key_type,
                    root_years=a.root_years, int_years=a.int_years, seal=a.seal, permitted=a.permitted,
                    ui_names="", public_host=a.public_host)
+        if a.acme_domains or a.acme_networks:
+            self.acme.save_settings("setup", enabled=True, domains_raw=a.acme_domains, networks_raw=a.acme_networks,
+                                    days=a.acme_days, require_eab=a.acme_eab)
         return True
 
     def notify_tls_changed(self) -> None:
@@ -434,6 +439,7 @@ class Service:
     def maintain(self) -> None:
         """Periodic housekeeping: keep the CRL fresh and renew the web certificate before it expires."""
         self.refresh_crl()
+        self.acme.cleanup()
         if self.ca.loaded() and not self.ca.sealed() and not self._ui_usable():
             self.issue_ui_cert()
             self.store.audit("system", "ui-cert", "Web UI certificate renewed automatically")

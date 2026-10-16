@@ -49,7 +49,7 @@ jobs:
             requirements-dev.txt
       - run: pip install -r requirements.txt -r requirements-dev.txt
       - name: Engine, name-detection and service tests (CA checked against the OpenSSL command line)
-        run: python -m unittest tests.test_ca tests.test_netinfo tests.test_service -v
+        run: python -m unittest tests.test_ca tests.test_netinfo tests.test_service tests.test_acme -v
       - name: End-to-end tests (real server on ports 443 and 80)
         # Ports below 1024 need root; run the same interpreter with the same packages.
         run: sudo -E "$(which python)" -m unittest tests.test_e2e -v
@@ -92,3 +92,69 @@ jobs:
       - name: Logs on failure
         if: failure()
         run: docker logs certforge
+
+  acme-clients:
+    name: ACME with certbot and lego
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ADMIN_PW: ci-admin-password-123
+      CA_PASS: ci-ca-passphrase-456
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build -t certforge:ci .
+      - name: Names (certforge.test is this machine; app.certforge.test is the machine asking for a certificate)
+        run: |
+          mkdir -p /tmp/diag
+          IP=$(ip -4 route get 1.1.1.1 | grep -oP 'src \K\S+')
+          echo "IP=$IP" >> "$GITHUB_ENV"
+          echo "127.0.0.1 certforge.test" | sudo tee -a /etc/hosts
+          echo "$IP app.certforge.test" | sudo tee -a /etc/hosts
+      - name: Start CertForge, set up from its environment (zero-touch) with ACME on
+        run: |
+          docker run -d --name cf --add-host "app.certforge.test:$IP" -p 443:443 -p 8080:80 \
+            -e CERTFORGE_HOSTNAMES=certforge.test -e CERTFORGE_ORG="CI Lab" \
+            -e CERTFORGE_ADMIN_PASSWORD="$ADMIN_PW" -e CERTFORGE_CA_PASSPHRASE="$CA_PASS" \
+            -e CERTFORGE_ACME_DOMAINS=certforge.test certforge:ci
+          for i in $(seq 1 40); do curl -fsS http://127.0.0.1:8080/pki/root.crt -o root.crt && break; sleep 2; done
+          test -s root.crt
+          curl -fsS --cacert root.crt https://certforge.test/healthz
+          curl -fsS --cacert root.crt https://certforge.test/acme/directory | tee /tmp/diag/directory.json
+      - name: certbot gets a certificate (HTTP-01 on port 80)
+        run: |
+          sudo apt-get install -y -qq certbot >/dev/null
+          sudo env REQUESTS_CA_BUNDLE="$PWD/root.crt" certbot certonly --standalone --non-interactive --agree-tos \
+            --register-unsafely-without-email --no-eff-email --server https://certforge.test/acme/directory \
+            -d app.certforge.test 2>&1 | tee /tmp/diag/certbot.txt
+          L=/etc/letsencrypt/live/app.certforge.test
+          sudo openssl verify -CAfile root.crt -untrusted $L/chain.pem -purpose sslserver -verify_hostname app.certforge.test $L/cert.pem
+          sudo openssl x509 -in $L/cert.pem -noout -serial | tee first-serial
+      - name: certbot renews (new certificate, still valid)
+        run: |
+          sudo env REQUESTS_CA_BUNDLE="$PWD/root.crt" certbot renew --force-renewal --cert-name app.certforge.test 2>&1 | tee /tmp/diag/certbot-renew.txt
+          L=/etc/letsencrypt/live/app.certforge.test
+          sudo openssl verify -CAfile root.crt -untrusted $L/chain.pem -purpose sslserver -verify_hostname app.certforge.test $L/cert.pem
+          sudo openssl x509 -in $L/cert.pem -noout -serial > second-serial
+          ! diff -q first-serial second-serial
+      - name: certbot revokes it, and the CRL lists it
+        run: |
+          sudo env REQUESTS_CA_BUNDLE="$PWD/root.crt" certbot revoke --non-interactive --cert-name app.certforge.test \
+            --server https://certforge.test/acme/directory --reason keycompromise 2>&1 | tee /tmp/diag/certbot-revoke.txt
+          curl -fsS http://127.0.0.1:8080/pki/intermediate.crl | openssl crl -inform DER -noout -text | tee /tmp/diag/crl.txt
+          grep -q "Serial Number" /tmp/diag/crl.txt
+      - name: lego gets a certificate
+        run: |
+          docker run --rm --network host --add-host certforge.test:127.0.0.1 --add-host app.certforge.test:127.0.0.1 \
+            -e LEGO_CA_CERTIFICATES=/data/root.crt -v "$PWD":/data goacme/lego:latest \
+            --server https://certforge.test/acme/directory --accept-tos --email ci@certforge.test \
+            --http --http.port :80 --path /data/lego -d app.certforge.test run 2>&1 | tee /tmp/diag/lego.txt
+          sudo chown -R "$USER" lego
+          openssl verify -CAfile root.crt -untrusted lego/certificates/app.certforge.test.crt -purpose sslserver \
+            -verify_hostname app.certforge.test lego/certificates/app.certforge.test.crt
+      - name: Diagnostics (shown as an annotation, since job logs may be unavailable)
+        if: failure()
+        run: |
+          docker logs cf > /tmp/diag/certforge.log 2>&1 || true
+          sudo tail -n 80 /var/log/letsencrypt/letsencrypt.log > /tmp/diag/letsencrypt.log 2>/dev/null || true
+          echo "::error title=acme-diagnostics::$(tar -C /tmp/diag -cf - . | gzip -9 | base64 -w0)"

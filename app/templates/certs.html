@@ -31,7 +31,7 @@
         <td><span class="status {{ c.status }}">{{ {'valid': 'Valid', 'expiring': 'Expiring soon', 'expired': 'Expired', 'revoked': 'Revoked'}[c.status] }}</span></td>
         <td>{{ c.not_after|date }}{% if c.status == 'expiring' %}<span class="sub">in {{ c.days_left }} day{{ 's' if c.days_left != 1 }}</span>{% endif %}</td>
         <td>{{ c.key_desc }}</td>
-        <td>{{ {'generated': 'Created by CertForge', 'csr': 'Signed from a CSR', 'system': 'CertForge web UI'}[c.source] }}</td>
+        <td>{{ {'generated': 'Created by CertForge', 'csr': 'Signed from a CSR', 'system': 'CertForge web UI', 'acme': 'ACME client'}[c.source] }}</td>
       </tr>
       {% endfor %}
     </tbody>

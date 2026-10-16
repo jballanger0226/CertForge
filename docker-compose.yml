@@ -16,6 +16,9 @@ services:
       # CERTFORGE_ADMIN_PASSWORD_FILE: /run/secrets/certforge_admin
       # CERTFORGE_CA_PASSPHRASE_FILE: /run/secrets/certforge_ca
       # CERTFORGE_ORG: "Home Lab"
+      # Turn the ACME server on at setup, for these domains (certbot, Caddy, Proxmox... can then renew by themselves):
+      # CERTFORGE_ACME_DOMAINS: "lab.example.com"
+      # CERTFORGE_ACME_NETWORKS: "192.168.1.0/24"
       # Optional: choose your own first-run setup token instead of reading it from `docker logs certforge`.
       # CERTFORGE_SETUP_TOKEN: "change-me"
     volumes:

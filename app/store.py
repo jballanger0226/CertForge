@@ -56,6 +56,24 @@ CREATE TABLE IF NOT EXISTS certs(
     revoke_reason TEXT
 );
 CREATE INDEX IF NOT EXISTS certs_issued ON certs(issued_at);
+CREATE TABLE IF NOT EXISTS acme_accounts(
+    id TEXT PRIMARY KEY, thumb TEXT UNIQUE NOT NULL, jwk TEXT NOT NULL, contact TEXT NOT NULL,
+    status TEXT NOT NULL, created TEXT NOT NULL, eab_kid TEXT
+);
+CREATE TABLE IF NOT EXISTS acme_orders(
+    id TEXT PRIMARY KEY, account TEXT NOT NULL, identifiers TEXT NOT NULL, status TEXT NOT NULL,
+    expires TEXT NOT NULL, error TEXT, serial TEXT, created TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS acme_orders_account ON acme_orders(account);
+CREATE TABLE IF NOT EXISTS acme_authz(
+    id TEXT PRIMARY KEY, order_id TEXT NOT NULL, itype TEXT NOT NULL, ivalue TEXT NOT NULL, status TEXT NOT NULL,
+    expires TEXT NOT NULL, token TEXT NOT NULL, chall_status TEXT NOT NULL, validated TEXT, error TEXT
+);
+CREATE INDEX IF NOT EXISTS acme_authz_order ON acme_authz(order_id);
+CREATE TABLE IF NOT EXISTS acme_eab(
+    kid TEXT PRIMARY KEY, hmac_key TEXT NOT NULL, label TEXT NOT NULL, created TEXT NOT NULL,
+    account TEXT, revoked INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS audit(
     id     INTEGER PRIMARY KEY AUTOINCREMENT,
     ts     TEXT NOT NULL,

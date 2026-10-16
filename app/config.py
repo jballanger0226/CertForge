@@ -17,6 +17,10 @@ class AutoSetup:
     int_years: int = 10
     permitted: str = ""
     public_host: str = ""     # blank: detected
+    acme_domains: str = ""    # turns the ACME server on for these domains (and networks) at setup
+    acme_networks: str = ""
+    acme_days: int = 90
+    acme_eab: bool = False
 
 
 @dataclass(frozen=True)
@@ -59,7 +63,10 @@ class Config:
                 key_type=env.get("CERTFORGE_KEY_TYPE", "ec-p384").strip() or "ec-p384",
                 root_years=num("CERTFORGE_ROOT_YEARS", 20), int_years=num("CERTFORGE_INT_YEARS", 10),
                 permitted=env.get("CERTFORGE_PERMITTED", "").strip(),
-                public_host=env.get("CERTFORGE_PUBLIC_HOST", "").strip())
+                public_host=env.get("CERTFORGE_PUBLIC_HOST", "").strip(),
+                acme_domains=env.get("CERTFORGE_ACME_DOMAINS", "").strip(), acme_networks=env.get("CERTFORGE_ACME_NETWORKS", "").strip(),
+                acme_days=num("CERTFORGE_ACME_DAYS", 90),
+                acme_eab=env.get("CERTFORGE_ACME_EAB", "").strip().lower() in ("1", "true", "yes", "on"))
 
         return cls(
             data=Path(env.get("CERTFORGE_DATA", "/data")),

@@ -50,6 +50,8 @@ cat > "$ROOT/etc/certforge.env" <<'ENV'
 # Zero-touch setup: set both and the CA is created on the next start, with no wizard.
 # CERTFORGE_ADMIN_PASSWORD=
 # CERTFORGE_CA_PASSPHRASE=
+# ACME server for certbot, Caddy, Proxmox and so on, turned on at setup for these domains:
+# CERTFORGE_ACME_DOMAINS=lab.example.com
 ENV
 chmod 600 "$ROOT/etc/certforge.env"
 echo certforge > "$ROOT/etc/hostname"

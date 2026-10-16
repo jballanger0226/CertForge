@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import functools
-import logging
 import hmac
+import json
+import logging
 import secrets
 from datetime import datetime
 from pathlib import Path
@@ -21,6 +22,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 from starlette.templating import Jinja2Templates
 
+from . import acme as acme_mod
 from . import ca as C
 from .security import safe_next
 from .service import PACKAGE_TTL, Service
@@ -134,7 +136,7 @@ def create_app(svc: Service) -> Starlette:
         parts = fp.split(":")
         return [":".join(parts[i:i + 8]) for i in range(0, len(parts), 8)]
 
-    templates.env.filters.update(date=_date, datetime=_datetime, fp_lines=_fp_lines)
+    templates.env.filters.update(date=_date, datetime=_datetime, fp_lines=_fp_lines, fromjson=json.loads)
     templates.env.globals.update(KEY_TYPES={k: v for k, v in C.KEY_TYPES.items() if k in C.LEAF_KEY_TYPES},
                                  CA_KEY_TYPES={k: C.KEY_TYPES[k] for k in C.CA_KEY_TYPES},
                                  PURPOSES={k: v[0] for k, v in C.PURPOSES.items()},
@@ -516,6 +518,48 @@ def create_app(svc: Service) -> Starlette:
             return go("/ca")
         return download(blob, name, "application/x-pem-file")
 
+    # ---- ACME administration (the protocol itself is in acme.py) -----------------------------
+    @authed
+    async def acme_page(request):
+        ov = await run_in_threadpool(svc.acme.overview)
+        host = request.headers.get("host", "")
+        return render(request, "acme.html", ov=ov, acme_url=f"https://{host}/acme/directory", pki_host=host)
+
+    def acme_action(fn):
+        @authed
+        async def wrapper(request):
+            form = await read_form(request)
+            try:
+                flash(request, "ok", await fn(request, form))
+            except C.CAError as e:
+                flash(request, "error", str(e))
+            return go("/acme")
+        return wrapper
+
+    @acme_action
+    async def acme_settings(request, form):
+        await run_in_threadpool(
+            lambda: svc.acme.save_settings(
+                "admin", enabled=bool(form.get("enabled")), domains_raw=str(form.get("domains", "")),
+                networks_raw=str(form.get("networks", "")), days=intval(form, "days", 90, "The lifetime"),
+                require_eab=bool(form.get("require_eab"))))
+        return "Saved."
+
+    @acme_action
+    async def acme_eab_new(request, form):
+        kid, key = await run_in_threadpool(svc.acme.new_eab, "admin", str(form.get("label", "")))
+        return f"Account key created. Key id: {kid}   HMAC key: {key}   (shown only now; copy both into the client)"
+
+    @acme_action
+    async def acme_eab_revoke(request, form):
+        await run_in_threadpool(svc.acme.revoke_eab, "admin", request.path_params["kid"])
+        return "Account key revoked."
+
+    @acme_action
+    async def acme_deactivate(request, form):
+        await run_in_threadpool(svc.acme.deactivate_account, "admin", request.path_params["id"])
+        return "Account deactivated. Its certificates stay valid until they expire or you revoke them."
+
     # ---- errors -------------------------------------------------------------------------
     async def http_error(request, exc: HTTPException):
         return render(request, "error.html", status=exc.status_code, code=exc.status_code, message=exc.detail)
@@ -554,6 +598,12 @@ def create_app(svc: Service) -> Starlette:
         Route("/ca/root-key/remove", ca_remove_key, methods=["POST"]),
         Route("/ca/intermediate/renew", ca_renew, methods=["POST"]),
         Route("/account/password", account_password, methods=["POST"]),
+        Route("/acme", acme_page),
+        Route("/acme/settings", acme_settings, methods=["POST"]),
+        Route("/acme/eab", acme_eab_new, methods=["POST"]),
+        Route("/acme/eab/{kid}/revoke", acme_eab_revoke, methods=["POST"]),
+        Route("/acme/accounts/{id}/deactivate", acme_deactivate, methods=["POST"]),
+        *acme_mod.routes(svc),
         Mount("/static", StaticFiles(directory=str(HERE / "static")), name="static"),
     ]
     middleware = [
