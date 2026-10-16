@@ -34,6 +34,7 @@ echo "structure OK"
 # The container's own network manager is masked for this test: it would try to reconfigure the
 # runner's real interfaces (DHCP is therefore not covered here).
 systemctl --root="$R" mask systemd-networkd.service systemd-networkd.socket systemd-networkd-wait-online.service >/dev/null
+mkdir -p "$R/var/log/journal"       # persistent journal, so a failed boot can be read afterwards
 echo "booting..."
 systemd-nspawn -q -D "$R" --boot --register=no --machine=certforge-verify >"$W/boot.log" 2>&1 &
 PID=$!
@@ -43,5 +44,9 @@ for _ in $(seq 1 60); do
   kill -0 "$PID" 2>/dev/null || fail "container exited: $(tail_log "$W/boot.log")"
   sleep 2
 done
-[ -n "$ok" ] || fail "CertForge didn't answer on 443 within 2 minutes: $(tail_log "$W/boot.log")"
+if [ -z "$ok" ]; then
+  kill "$PID" 2>/dev/null || true; sleep 3
+  j=$(journalctl -D "$R/var/log/journal" --no-pager -o cat -n 60 2>&1 | tr '\n' '|')
+  fail "CertForge didn't answer on 443 within 2 minutes. Console: $(tail_log "$W/boot.log") Journal: $j"
+fi
 echo "boot OK: https://127.0.0.1/healthz answered"
