@@ -182,8 +182,8 @@ td a.name { font-weight: 600; }
 @media (max-width: 36rem) { .facts { grid-template-columns: 1fr; gap: 0.1rem; } .facts dd { margin-bottom: 0.7rem; } }
 
 .sheet { position: relative; background: var(--sheet); border: 1px solid var(--rule); border-radius: 6px; padding: 1.6rem 1.6rem 1.8rem; margin-top: 1.6rem; overflow: hidden; }
-.sheet .seal { position: absolute; top: 1rem; right: 1.2rem; width: 7.5rem; height: 7.5rem; color: var(--stamp); opacity: 0.92; transform: rotate(-8deg); }
-.sheet .facts { padding-right: 8rem; }
+.sheet .seal { position: absolute; top: 1rem; right: 1.2rem; width: 9rem; height: 9rem; opacity: 1; transform: rotate(-8deg); }
+.sheet .facts { padding-right: 10rem; }
 @media (max-width: 40rem) { .sheet .seal { position: static; display: block; margin: 0 0 1rem auto; width: 5.5rem; height: 5.5rem; } .sheet .facts { padding-right: 0; } }
 
 @media (prefers-reduced-motion: no-preference) {
@@ -191,7 +191,7 @@ td a.name { font-weight: 600; }
   @keyframes stamp {
     0% { opacity: 0; transform: rotate(-22deg) scale(1.7); }
     60% { opacity: 1; transform: rotate(-6deg) scale(0.96); }
-    100% { opacity: 0.92; transform: rotate(-8deg) scale(1); }
+    100% { opacity: 1; transform: rotate(-8deg) scale(1); }
   }
 }
 
