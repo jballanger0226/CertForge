@@ -11,6 +11,7 @@ OUT="$(realpath -m "${2:-dist}")"
 SUITE="${3:-trixie}"
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ROOT="$(mktemp -d /var/tmp/certforge-rootfs.XXXXXX)"
+chmod 755 "$ROOT"      # mktemp makes it 0700, which would become the container's / and lock every non-root user out
 NAME="certforge_${VERSION}_amd64.tar.zst"
 
 [ "$(id -u)" -eq 0 ] || { echo "Run as root." >&2; exit 1; }

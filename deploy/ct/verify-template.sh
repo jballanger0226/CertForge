@@ -28,6 +28,7 @@ grep -q '^ID=debian' "$R/etc/os-release"          || fail "no Debian /etc/os-rel
 ls "$R"/etc/ssh/ssh_host_* >/dev/null 2>&1         && fail "SSH host keys baked in"
 uid=$(awk -F: '$1=="certforge"{print $3}' "$R/etc/passwd")      # host can't map the container's uids to names
 [ "$(stat -c %u:%a "$R/var/lib/certforge")" = "$uid:700" ] || fail "data dir owner/mode: $(stat -c %u:%a "$R/var/lib/certforge") (certforge is uid $uid)"
+[ "$(stat -c %a "$R")" = 755 ] || fail "root directory mode is $(stat -c %a "$R"), must be 755"
 echo "structure OK"
 
 # Boot it. nspawn shares the runner's network, so the service answers on the runner's port 443.
