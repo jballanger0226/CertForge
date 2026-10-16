@@ -1,4 +1,6 @@
-# CertForge
+<p align="center"><img src="docs/logo/mark.svg" alt="CertForge: two crossed keys in a ring" width="96"></p>
+
+<h1 align="center">CertForge</h1>
 
 [![CI](https://github.com/jballanger0226/CertForge/actions/workflows/ci.yml/badge.svg)](https://github.com/jballanger0226/CertForge/actions/workflows/ci.yml)
 
@@ -11,6 +13,15 @@ A small private certificate authority with a web page on port 443. Type a name, 
 - A public **Trust page** (`/trust`) hands out the root and intermediate certificates and shows how to trust them on Windows, macOS, iOS (profile), Android, Linux and Firefox.
 - An **ACME server** (the protocol behind Let's Encrypt), so certbot, acme.sh, lego, Caddy, Traefik and Proxmox can get and renew their own certificates, optionally signed by an **ACME issuing CA** of its own so the main CA's key can stay locked away.
 - Revocation with a CRL, certificates are listed with expiry warnings, and the web page's own certificate renews itself.
+
+## Screenshots
+
+| | |
+|---|---|
+| ![Setup complete: your CA is ready, sealed in wax](docs/screenshots/setup-complete.png) | ![Make a certificate](docs/screenshots/make-a-certificate.png) |
+| ![A certificate was created and stamped with the CA's seal](docs/screenshots/certificate-created.png) | ![The public trust page](docs/screenshots/trust-page.png) |
+
+The seal's ring of text is your CA's own name, and it is stamped onto the page whenever a certificate is issued. The light and dark themes follow your browser. The logo files are in [`docs/logo`](docs/logo).
 
 ## Run it with Docker
 
