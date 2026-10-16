@@ -11,7 +11,13 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 
-ENV CERTFORGE_DATA=/data \
+# Which build this is (shown in the web UI footer and on the CA page). Passed by the release workflow and CI.
+ARG VERSION=dev
+ARG REVISION=
+RUN printf '%s\n' "$VERSION" > VERSION && printf '%s\n' "$REVISION" > REVISION
+
+ENV CERTFORGE_DEPLOY=docker \
+    CERTFORGE_DATA=/data \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 

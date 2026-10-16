@@ -22,6 +22,11 @@ install -d -m 755 "$DEST"
 install -d -m 700 -o certforge -g certforge "$DATA"
 
 cp -r "$SRC/app" "$SRC/requirements.txt" "$DEST/"
+# Which build this is: a release tarball carries VERSION and REVISION; from a git checkout, derive them.
+if [ -f "$SRC/VERSION" ]; then cp "$SRC/VERSION" "$DEST/VERSION"; else
+  echo "0.0.0-$(git -C "$SRC" rev-parse --short=7 HEAD 2>/dev/null || echo dev)" > "$DEST/VERSION"; fi
+if [ -f "$SRC/REVISION" ]; then cp "$SRC/REVISION" "$DEST/REVISION"; else
+  git -C "$SRC" rev-parse HEAD 2>/dev/null > "$DEST/REVISION" || : > "$DEST/REVISION"; fi
 python3 -m venv "$DEST/venv"
 "$DEST/venv/bin/pip" install --quiet --upgrade pip
 "$DEST/venv/bin/pip" install --quiet -r "$DEST/requirements.txt"
@@ -40,6 +45,7 @@ if [ ! -f /etc/certforge.env ]; then
   } > /etc/certforge.env
 fi
 install -m 755 "$SRC/deploy/ct/certforge-code" /usr/local/bin/certforge-code
+install -m 755 "$SRC/deploy/certforge-update" /usr/local/bin/certforge-update
 install -m 644 "$SRC/deploy/certforge.service" /etc/systemd/system/certforge.service
 systemctl daemon-reload
 systemctl enable --now certforge

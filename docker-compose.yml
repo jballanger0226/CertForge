@@ -1,7 +1,8 @@
 services:
   certforge:
+    # Released image; `docker compose pull && docker compose up -d` updates it. `docker compose build` builds from this folder instead.
+    image: ghcr.io/jballanger0226/certforge:latest
     build: .
-    image: certforge:latest
     container_name: certforge
     restart: unless-stopped
     ports:

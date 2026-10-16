@@ -203,8 +203,14 @@ def check_port(bind: str, port: int) -> None:
 
 
 def main() -> None:
+    if "--version" in sys.argv[1:]:
+        from . import version
+        b = version.current()
+        print(f"CertForge {b.label}")
+        return
     cfg = Config.from_env()
     svc = Service(cfg)
+    log(f"CertForge {svc.build.label}")
     if not shutil_which("openssl"):
         raise SystemExit("The openssl command-line tool is required (it encrypts the CA keys). Install it and retry.")
     check_port(cfg.bind, cfg.https_port)

@@ -41,6 +41,7 @@ umount "$ROOT/proc"
 
 install -m 644 "$SRC/deploy/ct/certforge.service" "$ROOT/etc/systemd/system/certforge.service"
 install -m 755 "$SRC/deploy/ct/certforge-code" "$ROOT/usr/local/bin/certforge-code"
+install -m 755 "$SRC/deploy/certforge-update" "$ROOT/usr/local/bin/certforge-update"
 install -m 644 "$SRC/deploy/ct/motd" "$ROOT/etc/motd"
 install -d "$ROOT/etc/systemd/network"
 install -m 644 "$SRC/deploy/ct/network-fallback.network" "$ROOT/etc/systemd/network/zz-dhcp-fallback.network"
@@ -59,6 +60,7 @@ ENV
 chmod 600 "$ROOT/etc/certforge.env"
 echo certforge > "$ROOT/etc/hostname"
 printf '%s\n' "$VERSION" > "$ROOT/opt/certforge/VERSION"
+{ git -C "$SRC" rev-parse HEAD 2>/dev/null || echo "${GITHUB_SHA:-}"; } > "$ROOT/opt/certforge/REVISION"
 
 systemctl --root="$ROOT" enable certforge.service systemd-networkd.service systemd-networkd-wait-online.service >/dev/null
 systemctl --root="$ROOT" mask getty-static.service >/dev/null 2>&1 || true

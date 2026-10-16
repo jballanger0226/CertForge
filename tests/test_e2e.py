@@ -543,6 +543,30 @@ class TestMain(Base):
         self.post(a, "/account/password", data=dict(current="a-new-password-9876", new=ADMIN, new2=ADMIN))   # put it back
         self.login()    # proves the original password works again, and clears the failed-login count for the rate-limit test
 
+    def test_13_the_version_is_shown_and_updating_is_not_offered_in_the_browser(self):
+        anon = requests.get(self.base + "/login", verify=str(self.root))
+        self.assertNotIn("CertForge dev", anon.text)                    # the build isn't shown to people who aren't signed in
+        s = self.login()
+        page = s.get(self.base + "/ca").text
+        self.assertIn('id="software"', page)
+        self.assertRegex(page, r"CertForge (dev|\d+\.\d+\.\d+\S*)")        # also in the footer on every page
+        self.assertRegex(s.get(self.base + "/").text, r"<footer>\s*<div class=\"wrap\">\s*<span>CertForge ")
+        self.assertIn("never from this page", page)
+        # there is nothing to POST to that would install anything
+        for path in ("/ca/update", "/update", "/ca/updates/install", "/ca/updates/apply"):
+            self.assertIn(self.post(s, path).status_code, (404, 405), path)
+        self.assertEqual(s.get(self.base + "/ca/updates").status_code, 405)
+        # the check is opt-in, and switching it on and off is a logged action
+        self.assertNotIn("checked", re.search(r'<input[^>]*name="enabled"[^>]*>', page).group(0))
+        self.assertEqual(self.post(s, "/ca/updates", data={"enabled": "1"}).status_code, 303)
+        self.assertIn("checked", re.search(r'<input[^>]*name="enabled"[^>]*>', s.get(self.base + "/ca").text).group(0))
+        self.assertEqual(self.post(s, "/ca/updates").status_code, 303)
+        self.assertNotIn("checked", re.search(r'<input[^>]*name="enabled"[^>]*>', s.get(self.base + "/ca").text).group(0))
+        self.assertIn("Update check turned on", s.get(self.base + "/ca").text)
+        for path in ("/ca/updates", "/ca/updates/check"):                 # needs the CSRF token and a session
+            r = requests.post(self.base + path, verify=str(self.root), allow_redirects=False)
+            self.assertIn(r.status_code, (303, 400, 401, 403), path)
+
     def test_zz_login_is_rate_limited(self):
         s = requests.Session(); s.verify = str(self.root)
         tok = csrf_of(s.get(f"{self.base}/login").text)

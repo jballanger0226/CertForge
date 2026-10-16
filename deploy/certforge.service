@@ -8,6 +8,7 @@ User=certforge
 Group=certforge
 WorkingDirectory=/opt/certforge
 Environment=CERTFORGE_DATA=/var/lib/certforge
+Environment=CERTFORGE_DEPLOY=host
 EnvironmentFile=-/etc/certforge.env
 ExecStart=/opt/certforge/venv/bin/python -m app.server
 Restart=on-failure

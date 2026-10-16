@@ -49,7 +49,7 @@ jobs:
             requirements-dev.txt
       - run: pip install -r requirements.txt -r requirements-dev.txt
       - name: Engine, name-detection and service tests (CA checked against the OpenSSL command line)
-        run: python -m unittest tests.test_ca tests.test_netinfo tests.test_service tests.test_acme tests.test_acmeca -v
+        run: python -m unittest tests.test_ca tests.test_netinfo tests.test_service tests.test_acme tests.test_acmeca tests.test_version tests.test_update_tool -v
       - name: End-to-end tests (real server on ports 443 and 80)
         # Ports below 1024 need root; run the same interpreter with the same packages.
         run: sudo -E "$(which python)" -m unittest tests.test_e2e -v 2>&1 | tee /tmp/e2e.log
@@ -75,7 +75,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build
-        run: docker build -t certforge:ci .
+        run: docker build --build-arg VERSION=0.0.0-ci --build-arg REVISION=${GITHUB_SHA} -t certforge:ci .
       - name: Run with the same restrictions as docker-compose.yml
         run: |
           docker run -d --name certforge --read-only --tmpfs /tmp --cap-drop ALL \
@@ -90,6 +90,7 @@ jobs:
           done
           [ "$(docker inspect -f '{{.State.Health.Status}}' certforge)" = healthy ] || { docker logs certforge; exit 1; }
           test "$(docker exec certforge id -u)" != 0                       # not running as root
+          docker exec certforge python -m app.server --version | grep -q "^CertForge 0.0.0-ci (${GITHUB_SHA::7}"   # build identity is baked in
           # -k only because no CA exists yet on a fresh container; the e2e tests verify certificates properly.
           test "$(curl -ks https://localhost/healthz)" = ok
           curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' http://localhost/ | grep -q '^307 https://'
@@ -117,7 +118,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build the image
-        run: docker build -t certforge:ci .
+        run: docker build --build-arg VERSION=0.0.0-ci --build-arg REVISION=${GITHUB_SHA} -t certforge:ci .
       - name: Names (certforge.test is this machine; app.certforge.test is the machine asking for a certificate)
         run: |
           mkdir -p /tmp/diag

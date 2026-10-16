@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hmac
+import json
 import logging
 import os
 import plistlib
@@ -19,11 +20,13 @@ from cryptography.hazmat.primitives import serialization
 
 from . import ca as C
 from . import netinfo
+from . import version as V
 from .acme import Acme
 from .acmeca import AcmeAuthority
 from .config import Config
 from .security import MIN_PASSWORD, Ephemeral, RateLimiter, hash_password, random_password, verify_password
 from .store import Store, iso, parse_iso, utcnow
+from .updates import Updates
 
 log = logging.getLogger("certforge")
 
@@ -59,6 +62,9 @@ class Service:
         except PermissionError:
             pass
         self.store = Store(cfg.data / "certforge.db")
+        self.build = V.current()
+        self.updates = Updates(self.store, cfg, self.build)
+        self.record_build()
         self.ca = C.CertAuthority(cfg.data)
         self.ca.load()
         self.acme_ca = AcmeAuthority(cfg.data)
@@ -75,6 +81,32 @@ class Service:
         self._bootstrap_names: list[str] = []
         self.secret = self._secret()
         self.unlock_acme_ca_from_secret()
+
+    # ---- which version is running ---------------------------------------------------------
+    def record_build(self) -> None:
+        """Remember what is running, and note in the activity log when it changed since last time."""
+        b = self.build
+        prev = self.store.get("build")
+        if prev and (prev.get("version"), prev.get("revision")) == (b.version, b.revision):
+            return
+        if prev:
+            old = f"{prev['version']} ({prev['revision']})" if prev.get("revision") else prev["version"]
+            self.store.audit("system", "update", f"CertForge changed from {old} to {b.label}")
+            self.store.set("previous_build", prev)
+        self.store.set("build", {"version": b.version, "revision": b.revision, "since": iso(utcnow())})
+
+    def about(self) -> dict:
+        """What the CA page shows about the software itself."""
+        b = self.build
+        last = {}
+        try:
+            last = json.loads((self.cfg.data / "last-update.json").read_text())      # written by certforge-update
+        except (OSError, ValueError):
+            pass
+        cur = self.store.get("build") or {}
+        return {"version": b.version, "revision": b.revision, "label": b.label, "released": b.released, "deploy": b.deploy,
+                "since": cur.get("since"), "previous": self.store.get("previous_build"), "last_update": last,
+                "updates": self.updates.status(), "command": V.update_command(b.deploy)}
 
     # ---- bootstrap ------------------------------------------------------
     def _secret(self) -> str:
@@ -470,6 +502,11 @@ class Service:
         """Periodic housekeeping: keep the CRL fresh and renew the web certificate before it expires."""
         self.refresh_crl()
         self.acme.cleanup()
+        try:
+            if self.updates.due():
+                self.updates.check()
+        except Exception as e:      # a failed look at GitHub must never get in the way of the rest
+            log.warning("update check failed: %s", e)
         if self.ca.loaded() and not self.ca.sealed() and not self._ui_usable():
             self.issue_ui_cert()
             self.store.audit("system", "ui-cert", "Web UI certificate renewed automatically")
@@ -688,6 +725,10 @@ class Service:
             out.append({"level": "warn", "text": f"The intermediate CA expires in {left.days} days. Renew it on the CA page.", "href": "/ca"})
         if self.ca.root_key_present() and not self.store.get("root_key_exported"):
             out.append({"level": "info", "text": "Back up the root key, then take it off this server. It's only needed every few years.", "href": "/ca"})
+        up = self.updates.status()
+        if up["available"]:
+            out.append({"level": "info", "text": f"CertForge {up['latest']['version']} is available (this is {self.build.version}). "
+                                                 f"To update, run this on the host: {up['command']}", "href": "/ca#software"})
         ac = self.acme_ca
         if ac.loaded():
             if ac.sealed():

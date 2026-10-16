@@ -58,6 +58,8 @@ CERTFORGE_DATA=./data sudo -E python -m app.server     # or give python CAP_NET_
 | `CERTFORGE_HOSTNAMES` | detected | Names/IPs for the web page's first certificate. Set it in Docker, where CertForge can't see your network |
 | `CERTFORGE_HTTPS_PORT` | `443` | |
 | `CERTFORGE_HTTP_PORT` | `80` | `0` turns the plain-HTTP helper off |
+| `CERTFORGE_UPDATE_CHECK` | off | `1` lets CertForge ask GitHub about once a day whether a newer release exists (it never installs). Also a switch under CA > Software |
+| `CERTFORGE_UPDATE_REPO` | `jballanger0226/CertForge` | Where that check looks, for forks |
 | `CERTFORGE_BIND` | `0.0.0.0` | |
 | `CERTFORGE_SETUP_TOKEN` | random | Pick your own first-run setup code |
 | `CERTFORGE_ADMIN_PASSWORD` / `_FILE` | | Zero-touch setup: admin password (12+ characters) |
@@ -130,6 +132,23 @@ There are two shapes, both with their own key, name limits and revocation list (
 It is limited to the names you give it (blank means the same limits as your main CA), and refuses anything outside them whatever the ACME settings say. Those limits are written into its certificate, so the ACME page and dashboard warn you when the settings allow something the CA would refuse; widening them means retiring the CA and making a new one. **Renew** re-signs the same key for a new period, so certificates it already issued keep working. **Retire** moves the CA, keys included, aside (into `acme-ca-retired/` in the data folder) and turns ACME off, so nothing quietly falls back to a different CA. It can no longer update that CA's revocation list, so certificates it issued can't be revoked from here afterwards.
 
 For zero-touch setups set `CERTFORGE_ACME_CA=intermediate` (or `root`) and `CERTFORGE_ACME_CA_PASSPHRASE`. Creating it also needs `CERTFORGE_CA_PASSPHRASE` the first time (`root` needs `CERTFORGE_ACME_ROOT_PASSPHRASE` instead, and then keeps the root key on the server, because nobody is there to download it: back it up and remove it from the page). Once it exists, only the ACME passphrase is needed, to unlock it.
+
+## Updating
+
+CertForge shows which version is running in the footer and under **CA > Software**: the version, the git revision, when it started, what it was before, and the result of the last update. Each change of version is also written to the activity log.
+
+**Updates are installed from the command line of the server, never from the web page.** Replacing the program takes root on the machine, and keeping that out of the web login means a stolen admin password can't swap the code that holds your CA keys.
+
+| How you run it | To update |
+|---|---|
+| Docker | `docker compose pull && docker compose up -d` |
+| VM or Proxmox container | `sudo certforge-update` (in a container, run it inside the container) |
+
+`certforge-update` downloads the newest release from GitHub, checks it against the `SHA256SUMS` published with it, saves the current program and your data to `/var/backups/certforge` (the last three are kept), installs it, restarts the service and waits for the health check. If the new version doesn't come up, it puts the old program and data back. Other options: `--check` (look only), `--version 1.2.0` (a specific release, including an older one), `--file X.tar.gz --sha256 ...` (a download you made yourself, for machines with no internet) and `--rollback` (back to the saved program; data stays as it is now).
+
+**Look for new releases** is off by default. Turn it on under CA > Software (or set `CERTFORGE_UPDATE_CHECK=1`) and CertForge asks GitHub about once a day whether a newer release exists, then shows a notice with the command to run. It sends only the program name and version; GitHub sees the server's address. It never downloads or installs anything.
+
+Limits worth knowing: the checksum guards against a damaged or swapped download but releases are not signed, so you are trusting the GitHub repository. The updater replaces the program, not `/etc/certforge.env` or the systemd unit; if a release needs a unit change, its notes say so. The Docker image comes from GitHub's container registry once a release exists; until then use `docker compose build` and `up -d`. Releases are made by pushing a `v1.2.3` tag, which builds the tarball, the image and the Proxmox template.
 
 ## How your keys are protected
 

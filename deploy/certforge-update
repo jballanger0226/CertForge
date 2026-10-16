@@ -1,0 +1,414 @@
+#!/usr/bin/env python3
+"""certforge-update: update CertForge in place. Run on the host as root (sudo certforge-update).
+
+The web interface can tell you a newer release exists, but it can never install one: replacing the
+program takes root on the machine, so only someone who can log in to the container or host can do it.
+
+    sudo certforge-update                  install the newest release
+    sudo certforge-update --check          say what is available, change nothing
+    sudo certforge-update --version 1.2.0  install that release (also how you go back)
+    sudo certforge-update --file X.tar.gz  install a release tarball you downloaded yourself
+    sudo certforge-update --rollback       return to the copy saved by the last update
+
+Steps: download the release tarball and its SHA256SUMS, verify the checksum, unpack it safely, save
+the current program and data to /var/backups/certforge, install, restart the service, wait for the
+health check, and put everything back if the new version does not come up.
+Integrity here is the checksum published with the release over HTTPS from GitHub; releases are not
+separately signed.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+REPO = "jballanger0226/CertForge"
+KEEP_BACKUPS = 3
+MAX_DOWNLOAD = 100 * 1024 * 1024
+ALLOWED_TOP = {"app", "requirements.txt", "deploy", "VERSION", "REVISION"}
+_SEMVER = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$")
+
+
+class Fail(Exception):
+    pass
+
+
+def say(msg: str = "") -> None:
+    print(msg, flush=True)
+
+
+def parse(v: str):
+    m = _SEMVER.match((v or "").strip())
+    return (int(m[1]), int(m[2]), int(m[3]), m[4] or "") if m else None
+
+
+def newer(a: str, b: str) -> bool | None:
+    pa, pb = parse(a), parse(b)
+    if not pa or not pb:
+        return None
+    key = lambda p: (p[0], p[1], p[2], p[3] == "", p[3])  # noqa: E731
+    return key(pa) > key(pb)
+
+
+def read_line(path: Path) -> str:
+    try:
+        return path.read_text().strip().splitlines()[0].strip()
+    except (OSError, IndexError):
+        return ""
+
+
+class Updater:
+    def __init__(self, prefix="/opt/certforge", data="/var/lib/certforge", backups="/var/backups/certforge",
+                 service="certforge", repo=REPO, user="certforge", http=None, run=None, health=None, build_venv=None,
+                 is_root=None, now=None):
+        self.prefix, self.data, self.backups = Path(prefix), Path(data), Path(backups)
+        self.service, self.repo, self.user = service, repo, user
+        self.http = http or self._http
+        self.run = run or self._run
+        self.health = health or self._health
+        self.build_venv = build_venv or self._build_venv
+        self.is_root = (lambda: os.geteuid() == 0) if is_root is None else is_root
+        self.now = now or (lambda: datetime.now(timezone.utc))
+
+    # ---- the outside world (replaced in tests) -------------------------------------------------------
+    @staticmethod
+    def _http(url: str, limit: int = MAX_DOWNLOAD) -> bytes:
+        req = urllib.request.Request(url, headers={"User-Agent": "certforge-update", "Accept": "application/vnd.github+json, application/octet-stream"})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = r.read(limit + 1)
+        except urllib.error.HTTPError as e:
+            raise Fail(f"GitHub answered {e.code} for {url}") from None
+        except OSError as e:
+            raise Fail(f"Couldn't reach {url}: {getattr(e, 'reason', None) or e}") from None
+        if len(data) > limit:
+            raise Fail("The download is larger than expected; refusing it.")
+        return data
+
+    @staticmethod
+    def _run(cmd: list[str]) -> int:
+        return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True).returncode
+
+    @staticmethod
+    def _health(timeout: int = 90) -> bool:
+        import ssl
+        ctx = ssl.create_default_context()
+        ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE        # talks to this machine only
+        end = time.time() + timeout
+        while time.time() < end:
+            try:
+                with urllib.request.urlopen("https://127.0.0.1/healthz", context=ctx, timeout=4) as r:
+                    if r.read() == b"ok":
+                        return True
+            except OSError:
+                pass
+            time.sleep(2)
+        return False
+
+    def _build_venv(self, venv: Path, requirements: Path) -> None:
+        subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
+        subprocess.run([str(venv / "bin" / "pip"), "install", "--quiet", "--no-cache-dir", "-r", str(requirements)], check=True)
+
+    # ---- what is installed / what exists ---------------------------------------------------------------
+    def installed(self) -> tuple[str, str]:
+        return read_line(self.prefix / "VERSION") or "unknown", read_line(self.prefix / "REVISION")[:7]
+
+    @staticmethod
+    def label(version: str, revision: str) -> str:
+        return f"{version} ({revision})" if revision else version
+
+    def release(self, version: str | None) -> dict:
+        path = f"tags/v{version.lstrip('v')}" if version else "latest"
+        try:
+            data = json.loads(self.http(f"https://api.github.com/repos/{self.repo}/releases/{path}", 1_000_000))
+        except ValueError:
+            raise Fail("GitHub's answer wasn't understood.") from None
+        tag = str(data.get("tag_name", ""))
+        if not parse(tag):
+            raise Fail(f"The release is called '{tag}', which isn't a version number.")
+        assets = {a["name"]: a["browser_download_url"] for a in data.get("assets", []) if "name" in a and "browser_download_url" in a}
+        return {"version": tag.lstrip("v"), "tag": tag, "assets": assets}
+
+    # ---- steps -----------------------------------------------------------------------------------------
+    @staticmethod
+    def verify(tarball: Path, expected: str) -> None:
+        got = hashlib.sha256(tarball.read_bytes()).hexdigest()
+        if got != expected.lower():
+            raise Fail(f"The checksum doesn't match (expected {expected[:16]}…, got {got[:16]}…). Nothing was changed.")
+
+    @staticmethod
+    def unpack(tarball: Path, dest: Path) -> Path:
+        """Extract only plain files and folders, only under the expected names, never outside dest."""
+        dest.mkdir(parents=True)
+        try:
+            with tarfile.open(tarball, "r:*") as tf:
+                members = tf.getmembers()
+                wrapper = None                      # one wrapping folder (certforge-1.2.0/) is allowed
+                for m in members:
+                    parts = Path(m.name).parts
+                    if m.name.startswith("/") or ".." in parts or not parts:
+                        raise Fail(f"Unsafe path in the archive: {m.name}")
+                    if not (m.isfile() or m.isdir()):
+                        raise Fail(f"The archive contains something that isn't a plain file or folder: {m.name}")
+                    if parts[0] in ALLOWED_TOP:
+                        w = None
+                    elif m.isdir() and len(parts) == 1 or len(parts) > 1 and parts[1] in ALLOWED_TOP:
+                        w = parts[0]
+                    else:
+                        raise Fail(f"Unexpected item in the archive: {m.name}")
+                    if w is not None and wrapper not in (None, w):
+                        raise Fail("The archive has an unexpected layout.")
+                    if w is None and wrapper is not None:
+                        raise Fail("The archive has an unexpected layout.")
+                    wrapper = w if w is not None else wrapper
+                root = wrapper
+                for m in members:
+                    m.mode &= 0o755 if m.isdir() else 0o644
+                    m.uid = m.gid = 0
+                    m.uname = m.gname = ""
+                tf.extractall(dest, members=members, filter="data") if hasattr(tarfile, "data_filter") else tf.extractall(dest, members=members)
+        except (tarfile.TarError, EOFError, OSError) as e:
+            raise Fail(f"The archive couldn't be unpacked: {e}") from None
+        src = dest / root if root else dest
+        for need in ("app/server.py", "requirements.txt", "VERSION"):
+            if not (src / need).is_file():
+                raise Fail(f"The archive doesn't look like a CertForge release (missing {need}).")
+        return src
+
+    def _service(self, verb: str) -> None:
+        if self.run(["systemctl", verb, self.service]) != 0 and verb != "stop":
+            raise Fail(f"systemctl {verb} {self.service} failed.")
+
+    def backup(self, version: str, revision: str) -> Path:
+        self.backups.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.backups, 0o700)
+        stamp = self.now().strftime("%Y%m%dT%H%M%SZ")
+        path = self.backups / f"certforge-{stamp}-{version.replace('/', '_')}.tar.gz"
+        old = os.umask(0o077)
+        try:
+            with tarfile.open(path, "w:gz") as tf:
+                for name in ("app", "requirements.txt", "VERSION", "REVISION"):
+                    if (self.prefix / name).exists():
+                        tf.add(self.prefix / name, arcname=f"program/{name}")
+                if self.data.exists():
+                    tf.add(self.data, arcname="data")
+        finally:
+            os.umask(old)
+        os.chmod(path, 0o600)
+        keep = sorted(self.backups.glob("certforge-*.tar.gz"))
+        for stale in keep[:-KEEP_BACKUPS]:
+            stale.unlink()
+        return path
+
+    def _place(self, src: Path) -> None:
+        for name in ("app", "requirements.txt", "VERSION", "REVISION"):
+            target = self.prefix / name
+            if target.is_dir():
+                shutil.rmtree(target)
+            elif target.exists():
+                target.unlink()
+            if (src / name).exists():
+                if (src / name).is_dir():
+                    shutil.copytree(src / name, target)
+                else:
+                    shutil.copy2(src / name, target)
+        for root, dirs, files in os.walk(self.prefix / "app"):
+            if "__pycache__" in dirs:
+                shutil.rmtree(Path(root) / "__pycache__")
+                dirs.remove("__pycache__")
+
+    def _restore(self, backup: Path, with_data: bool) -> None:
+        with tempfile.TemporaryDirectory(prefix="certforge-restore-") as t:
+            with tarfile.open(backup, "r:gz") as tf:
+                tf.extractall(t, filter="data") if hasattr(tarfile, "data_filter") else tf.extractall(t)
+            self._place(Path(t) / "program")
+            if with_data and (Path(t) / "data").exists():
+                for item in list(self.data.iterdir()):
+                    shutil.rmtree(item) if item.is_dir() and not item.is_symlink() else item.unlink()
+                for item in (Path(t) / "data").iterdir():
+                    (shutil.copytree if item.is_dir() else shutil.copy2)(item, self.data / item.name)
+                self._chown(self.data)
+
+    def _chown(self, path: Path) -> None:
+        try:
+            import pwd
+            u = pwd.getpwnam(self.user)
+        except (ImportError, KeyError):
+            return
+        for root, dirs, files in os.walk(path):
+            for n in [root, *[os.path.join(root, x) for x in dirs + files]]:
+                try:
+                    os.chown(n, u.pw_uid, u.pw_gid)
+                except OSError:
+                    pass
+
+    def _record(self, before: str, after: str, backup: Path) -> None:
+        note = {"from_version": before, "to_version": after, "when": self.now().strftime("%Y-%m-%dT%H:%M:%SZ"), "backup": str(backup)}
+        tmp = self.data / ".last-update.tmp"
+        tmp.write_text(json.dumps(note))
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, self.data / "last-update.json")
+        self._chown(self.data / "last-update.json")
+
+    # ---- commands --------------------------------------------------------------------------------------
+    def check(self, version: str | None = None) -> int:
+        cur, rev = self.installed()
+        rel = self.release(version)
+        say(f"Installed: {self.label(cur, rev)}")
+        say(f"Latest:    {rel['version']}")
+        n = newer(rel["version"], cur)
+        say("You are up to date." if n is False and not version else "An update is available." if n else "These can't be compared; use --version to choose.")
+        return 0
+
+    def install(self, version: str | None = None, file: Path | None = None, sha256: str | None = None, yes: bool = True) -> int:
+        self._need_root()
+        cur, rev = self.installed()
+        with tempfile.TemporaryDirectory(prefix="certforge-update-") as t:
+            work = Path(t)
+            if file:
+                tarball = Path(file)
+                if not tarball.is_file():
+                    raise Fail(f"{file} doesn't exist.")
+                if not sha256:
+                    say("Note: no --sha256 given, so this file is installed unverified. You are trusting wherever you got it.")
+                else:
+                    self.verify(tarball, sha256)
+                target = None
+            else:
+                rel = self.release(version)
+                target = rel["version"]
+                if not version and newer(target, cur) is False:
+                    say(f"CertForge {self.label(cur, rev)} is already the newest release.")
+                    return 0
+                name = f"certforge-{target}.tar.gz"
+                if name not in rel["assets"] or "SHA256SUMS" not in rel["assets"]:
+                    raise Fail(f"Release v{target} has no {name} / SHA256SUMS to install.")
+                say(f"Downloading CertForge {target} …")
+                tarball = work / name
+                tarball.write_bytes(self.http(rel["assets"][name]))
+                sums = self.http(rel["assets"]["SHA256SUMS"], 1_000_000).decode("utf-8", "replace")
+                want = next((ln.split()[0] for ln in sums.splitlines() if len(ln.split()) == 2 and ln.split()[1].lstrip("*") == name), "")
+                if not re.fullmatch(r"[0-9a-fA-F]{64}", want):
+                    raise Fail(f"SHA256SUMS has no entry for {name}.")
+                self.verify(tarball, want)
+                say("Checksum verified.")
+            src = self.unpack(tarball, work / "unpacked")
+            new_version, new_rev = read_line(src / "VERSION"), read_line(src / "REVISION")[:7]
+            if target and new_version.lstrip("v") != target:
+                raise Fail(f"The archive says it is {new_version}, not {target}. Nothing was changed.")
+            say(f"Updating {self.label(cur, rev)}  →  {self.label(new_version, new_rev)}")
+            venv_new = None
+            if read_line_all(src / "requirements.txt") != read_line_all(self.prefix / "requirements.txt") or not (self.prefix / "venv").exists():
+                say("Dependencies changed; building a new Python environment …")
+                venv_new = self.prefix / "venv.new"
+                shutil.rmtree(venv_new, ignore_errors=True)
+                try:
+                    self.build_venv(venv_new, src / "requirements.txt")
+                except (subprocess.CalledProcessError, OSError) as e:
+                    shutil.rmtree(venv_new, ignore_errors=True)
+                    raise Fail(f"Couldn't install the new dependencies ({e}). Nothing was changed.") from None
+            self._service("stop")
+            backup = self.backup(cur, rev)
+            say(f"Saved the current program and data to {backup}")
+            venv_old = None
+            try:
+                self._place(src)
+                if venv_new:
+                    venv_old = self.prefix / "venv.old"
+                    shutil.rmtree(venv_old, ignore_errors=True)
+                    if (self.prefix / "venv").exists():
+                        (self.prefix / "venv").rename(venv_old)
+                    venv_new.rename(self.prefix / "venv")
+                self._service("start")
+                ok = self.health()
+            except Exception as e:  # noqa: BLE001
+                say(f"The update failed: {e}")
+                ok = False
+            if not ok:
+                say("The new version did not come up. Putting the previous version back …")
+                self.run(["systemctl", "stop", self.service])
+                self._restore(backup, with_data=True)
+                if venv_old and venv_old.exists():
+                    shutil.rmtree(self.prefix / "venv", ignore_errors=True)
+                    venv_old.rename(self.prefix / "venv")
+                self._service("start")
+                back = self.health()
+                say(f"CertForge {self.label(cur, rev)} is {'running again' if back else 'NOT responding; check: journalctl -u certforge'}.")
+                raise Fail("Rolled back." if back else "Rollback finished but the service isn't healthy.")
+            if venv_old:
+                shutil.rmtree(venv_old, ignore_errors=True)
+            self._record(self.label(cur, rev), self.label(new_version, new_rev), backup)
+            say(f"Done. CertForge {self.label(new_version, new_rev)} is running.")
+            say(f"To go back:  sudo certforge-update --rollback   (backup: {backup})")
+        return 0
+
+    def rollback(self) -> int:
+        self._need_root()
+        saved = sorted(self.backups.glob("certforge-*.tar.gz"))
+        if not saved:
+            raise Fail("There is no saved copy to go back to.")
+        backup = saved[-1]
+        cur, rev = self.installed()
+        say(f"Restoring the program from {backup.name} (your data is left as it is now).")
+        self._service("stop")
+        self._restore(backup, with_data=False)
+        self._service("start")
+        if not self.health():
+            raise Fail("The restored version isn't responding; check: journalctl -u certforge")
+        now, nrev = self.installed()
+        self._record(self.label(cur, rev), self.label(now, nrev), backup)
+        say(f"Done. CertForge {self.label(now, nrev)} is running.")
+        say("The program was restored but not the data: if the newer version changed the database, the older one may not read it. The backup file holds the data from before the update.")
+        return 0
+
+    def _need_root(self) -> None:
+        if not self.is_root():
+            raise Fail("Run this as root: sudo certforge-update. Only an administrator of this machine can update CertForge.")
+
+
+def read_line_all(path: Path) -> str:
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return ""
+
+
+def main(argv=None, **kw) -> int:
+    ap = argparse.ArgumentParser(prog="certforge-update", description="Update CertForge in place (run as root on the host).")
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument("--check", action="store_true", help="say whether a newer release exists; change nothing")
+    g.add_argument("--rollback", action="store_true", help="return to the program saved by the last update")
+    g.add_argument("--file", metavar="TARBALL", help="install a release tarball you already downloaded")
+    ap.add_argument("--version", metavar="X.Y.Z", help="install this release instead of the newest")
+    ap.add_argument("--sha256", help="expected SHA-256 of --file")
+    ap.add_argument("--repo", default=os.environ.get("CERTFORGE_UPDATE_REPO", REPO), help=argparse.SUPPRESS)
+    a = ap.parse_args(argv)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", a.repo):
+        say("That isn't a GitHub repository name like owner/name.")
+        return 2
+    u = Updater(repo=a.repo, **kw)
+    try:
+        if a.check:
+            return u.check(a.version)
+        if a.rollback:
+            return u.rollback()
+        return u.install(version=a.version, file=Path(a.file) if a.file else None, sha256=a.sha256)
+    except Fail as e:
+        say(f"certforge-update: {e}")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

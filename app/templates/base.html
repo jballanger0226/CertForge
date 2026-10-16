@@ -63,7 +63,7 @@
 
   <footer>
     <div class="wrap">
-      <span>CertForge, a private certificate authority for your network.</span>
+      <span>CertForge{% if build %} {{ build }}{% endif %}, a private certificate authority for your network.</span>
       <a href="/trust">Trust this CA on a device</a>
     </div>
   </footer>

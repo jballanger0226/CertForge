@@ -1,0 +1,74 @@
+name: Release
+
+# Runs when a version tag (v1.2.3) is pushed. Attaches the program tarball that `certforge-update` installs,
+# with its SHA256SUMS, and publishes the Docker image to GitHub's container registry.
+# (The Proxmox template is attached by its own workflow on the same tag.)
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  tarball:
+    name: Program tarball and checksums
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the tag is a version
+        run: '[[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::$GITHUB_REF_NAME is not vMAJOR.MINOR.PATCH"; exit 1; }'
+      - name: Build
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          mkdir -p dist stage
+          cp -r app requirements.txt deploy stage/
+          find stage -name __pycache__ -prune -exec rm -rf {} +
+          echo "$v" > stage/VERSION
+          echo "$GITHUB_SHA" > stage/REVISION
+          tar -C stage --owner=0 --group=0 --numeric-owner -czf "dist/certforge-$v.tar.gz" .
+          (cd dist && sha256sum "certforge-$v.tar.gz" > SHA256SUMS && cat SHA256SUMS)
+      - name: Smoke test the tarball with the updater's own checks
+        run: |
+          python3 - <<'PY'
+          import importlib.machinery as m, importlib.util as u, os, pathlib, tempfile
+          path = "deploy/certforge-update"
+          ld = m.SourceFileLoader("cu", path); mod = u.module_from_spec(u.spec_from_loader("cu", ld)); ld.exec_module(mod)
+          v = os.environ["GITHUB_REF_NAME"].lstrip("v")
+          src = mod.Updater().unpack(pathlib.Path(f"dist/certforge-{v}.tar.gz"), pathlib.Path(tempfile.mkdtemp()) / "x")
+          assert (src / "VERSION").read_text().strip() == v, "VERSION mismatch"
+          print("tarball unpacks and says", v)
+          PY
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "CertForge $GITHUB_REF_NAME" \
+                 --notes "Update an installed copy with: sudo certforge-update. Docker: docker compose pull && docker compose up -d. See the README, Updating."
+          gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+
+  image:
+    name: Docker image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Build and push
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          img="ghcr.io/${GITHUB_REPOSITORY,,}"
+          docker build --build-arg VERSION="$v" --build-arg REVISION="$GITHUB_SHA" -t "$img:$v" -t "$img:latest" .
+          docker run --rm "$img:$v" python -m app.server --version | grep -F "CertForge $v"
+          docker push "$img:$v"
+          # a pre-release must not become "latest"
+          [[ "$v" == *-* ]] || docker push "$img:latest"

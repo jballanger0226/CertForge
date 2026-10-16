@@ -49,6 +49,8 @@ class Config:
     auto: AutoSetup | None = None
     acme_ca_passphrase: str = ""          # unlocks the ACME issuing key at start (when it is set to unlock that way)
     acme_ca_auto: AutoAcmeCa | None = None
+    update_check: bool = False            # look for newer releases (off unless asked; the CA page can switch it too)
+    update_repo: str = "jballanger0226/CertForge"
 
     @classmethod
     def from_env(cls, env=os.environ) -> "Config":
@@ -113,4 +115,6 @@ class Config:
             hostnames=env.get("CERTFORGE_HOSTNAMES", "").strip(),
             setup_token=env.get("CERTFORGE_SETUP_TOKEN") or None,
             auto=auto, acme_ca_passphrase=acme_pw, acme_ca_auto=acme_auto,
+            update_check=env.get("CERTFORGE_UPDATE_CHECK", "").strip().lower() in ("1", "true", "yes", "on"),
+            update_repo=env.get("CERTFORGE_UPDATE_REPO", "").strip() or "jballanger0226/CertForge",
         )

@@ -114,6 +114,42 @@
   </form>
 </section>
 
+<section id="software">
+  <h2>Software</h2>
+  <dl class="facts">
+    <dt>Version</dt><dd>{{ about.version }}{% if not about.released %} <span class="small">(not a tagged release)</span>{% endif %}</dd>
+    <dt>Revision</dt><dd class="hex">{{ about.revision or 'unknown' }}</dd>
+    {% if about.since %}<dt>Running since</dt><dd>{{ about.since|datetime }}{% if about.previous %}, after {{ about.previous.version }}{% if about.previous.revision %} ({{ about.previous.revision }}){% endif %}{% endif %}</dd>{% endif %}
+    {% if about.last_update %}<dt>Last update</dt><dd>{{ about.last_update.from_version }} to {{ about.last_update.to_version }}, on {{ about.last_update.when|datetime }}{% if about.last_update.backup %}. Your data was backed up first to <span class="hex">{{ about.last_update.backup }}</span>{% endif %}</dd>{% endif %}
+  </dl>
+  {% set up = about.updates %}
+  {% if up.available %}
+    <p class="note info">CertForge <strong>{{ up.latest.version }}</strong> is available{% if up.latest.published %} (published {{ up.latest.published }}){% endif %}. <a href="{{ up.latest.url }}">See what changed</a>.</p>
+  {% elif up.current %}
+    <p class="note ok">You're on the newest release{% if up.checked %}, as of {{ up.checked|datetime }}{% endif %}.</p>
+  {% elif up.uncomparable %}
+    <p class="note info">The newest release is {{ up.latest.version }}. This copy is a development build ({{ about.version }}), so it can't be compared.</p>
+  {% endif %}
+  {% if up.error %}<p class="note warn">The last check failed: {{ up.error }}</p>{% endif %}
+  <h3>Updating</h3>
+  <p>Updates are installed from the command line of the server, by whoever administers it, and never from this page. That keeps the web login from being able to change the program that holds your CA keys. Run this on the host:</p>
+  <div class="cmdrow"><pre class="cmd" id="c-update">{{ about.command }}</pre><button type="button" class="btn quiet small" data-copy="#c-update">Copy</button></div>
+  {% if about.deploy == 'host' %}<p class="small"><code>sudo certforge-update --check</code> only looks. <code>sudo certforge-update --rollback</code> returns to the previous version. Your data is backed up before every update.</p>{% endif %}
+  <h3>Look for new releases</h3>
+  <form method="post" action="/ca/updates" class="narrow">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label class="check"><input type="checkbox" name="enabled" value="1"{% if up.enabled %} checked{% endif %}>
+      <span>Check GitHub about once a day for a newer release, and say so here and on the dashboard. It sends nothing but the program name and version, but GitHub sees this server's address. Off by default.</span></label>
+    <div class="actions"><button class="btn quiet" type="submit">Save</button></div>
+  </form>
+  {% if up.enabled %}
+  <form method="post" action="/ca/updates/check" class="narrow mt">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <div class="actions"><button class="btn quiet" type="submit">Check now</button></div>
+  </form>
+  {% endif %}
+</section>
+
 <section>
   <h2>Admin password</h2>
   <form method="post" action="/account/password" class="narrow">

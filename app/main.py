@@ -177,6 +177,7 @@ def create_app(svc: Service) -> Starlette:
             "flashes": [tuple(f) for f in request.session.pop("flash", [])],
             "sealed": svc.ca.sealed() if loaded else False,
             "host": request_host(request), "path": request.url.path,
+            "build": svc.build.label if user(request) else "",        # the version isn't shown to the public
         }
         return templates.TemplateResponse(request, template, {**base, **ctx}, status_code=status)
 
@@ -452,7 +453,7 @@ def create_app(svc: Service) -> Starlette:
     # ---- the CA ----------------------------------------------------------------------
     @authed
     async def ca_page(request):
-        return render(request, "ca.html", ca=svc.ca_summary(), audit=svc.store.recent_audit(25),
+        return render(request, "ca.html", ca=svc.ca_summary(), about=svc.about(), audit=svc.store.recent_audit(25),
                       names="\n".join(svc.store.get("ui_names", [])), slug=C.slugify(svc.ca.meta["org"]))
 
     def ca_action(fn):
@@ -501,6 +502,21 @@ def create_app(svc: Service) -> Starlette:
         await run_in_threadpool(svc.renew_intermediate, "admin", str(form.get("passphrase", "")),
                                 intval(form, "years", 10, "The lifetime"), key)
         return "The intermediate certificate has been renewed. Certificates you've already issued keep working."
+
+    @ca_action
+    async def ca_updates(request, form):
+        svc.updates.set_enabled(bool(form.get("enabled")))
+        svc.store.audit("admin", "update-check", "Update check turned " + ("on" if form.get("enabled") else "off"))
+        return "Saved. CertForge will look for new releases about once a day." if form.get("enabled") else "Saved. CertForge won't look for new releases."
+
+    @ca_action
+    async def ca_updates_check(request, form):
+        st = await run_in_threadpool(svc.updates.check)
+        if st["error"]:
+            raise C.CAError(f"Couldn't check: {st['error']}")
+        if st["available"]:
+            return f"CertForge {st['latest']['version']} is available."
+        return "No newer release was found." if st["latest"] or not st["uncomparable"] else "Checked."
 
     @ca_action
     async def account_password(request, form):
@@ -696,6 +712,8 @@ def create_app(svc: Service) -> Starlette:
         Route("/ca/root-key/export", ca_export_key, methods=["POST"]),
         Route("/ca/root-key/remove", ca_remove_key, methods=["POST"]),
         Route("/ca/intermediate/renew", ca_renew, methods=["POST"]),
+        Route("/ca/updates", ca_updates, methods=["POST"]),
+        Route("/ca/updates/check", ca_updates_check, methods=["POST"]),
         Route("/account/password", account_password, methods=["POST"]),
         Route("/acme", acme_page),
         Route("/acme/settings", acme_settings, methods=["POST"]),
