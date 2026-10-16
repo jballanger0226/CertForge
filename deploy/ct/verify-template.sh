@@ -33,7 +33,7 @@ uid=$(awk -F: '$1=="certforge"{print $3}' "$R/etc/passwd")      # host can't map
 [ -s "$R/opt/certforge/VERSION" ]                  || fail "VERSION missing"
 grep -q '^Environment=CERTFORGE_DEPLOY=host' "$R/etc/systemd/system/certforge.service" || fail "unit doesn't say it is a host install (the web UI would show the wrong update command)"
 systemd-nspawn -q -D "$R" /usr/local/bin/certforge-update --help >/dev/null 2>&1 || fail "certforge-update doesn't run inside the template"
-systemd-nspawn -q -D "$R" --setenv=CERTFORGE_DEPLOY=host /opt/certforge/venv/bin/python -m app.server --version 2>&1 | grep -q "^CertForge $(tr -d '\n' < "$R/opt/certforge/VERSION")" || fail "the app doesn't report the template's version"
+systemd-nspawn -q -D "$R" --chdir=/opt/certforge --setenv=CERTFORGE_DEPLOY=host /opt/certforge/venv/bin/python -m app.server --version 2>&1 | grep -q "^CertForge $(tr -d '\n' < "$R/opt/certforge/VERSION")" || fail "the app doesn't report the template's version"
 echo "structure OK"
 
 # Boot it. nspawn shares the runner's network, so the service answers on the runner's port 443.
