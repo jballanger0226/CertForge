@@ -222,3 +222,7 @@ pre.cmd { background: var(--sheet); border: 1px solid var(--rule); border-radius
 .center-page { max-width: 28rem; margin: 3rem auto 0; }
 
 .big-actions { display: flex; flex-wrap: wrap; gap: 0.8rem; margin: 1.2rem 0 0.6rem; }
+
+/* radio groups, such as how the ACME issuing key is unlocked */
+fieldset.choice { border: 0; padding: 0; margin: 1.4rem 0 0; }
+fieldset.choice legend { padding: 0; font-weight: 600; margin-bottom: .4rem; }

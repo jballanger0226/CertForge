@@ -19,6 +19,11 @@ services:
       # Turn the ACME server on at setup, for these domains (certbot, Caddy, Proxmox... can then renew by themselves):
       # CERTFORGE_ACME_DOMAINS: "lab.example.com"
       # CERTFORGE_ACME_NETWORKS: "192.168.1.0/24"
+      # A separate signing CA for ACME, so your main CA's key can stay locked (README: "A separate CA for ACME").
+      # 'intermediate' = signed by your existing root; 'root' = its own root (then also CERTFORGE_ACME_ROOT_PASSPHRASE_FILE).
+      # The passphrase below also unlocks the key at every start, so it must stay available as a secret.
+      # CERTFORGE_ACME_CA: "intermediate"
+      # CERTFORGE_ACME_CA_PASSPHRASE_FILE: /run/secrets/certforge_acme_ca
       # Optional: choose your own first-run setup token instead of reading it from `docker logs certforge`.
       # CERTFORGE_SETUP_TOKEN: "change-me"
     volumes:
@@ -33,7 +38,8 @@ services:
 # secrets:                               # for zero-touch setup
 #   certforge_admin: {file: ./secrets/admin_password.txt}
 #   certforge_ca: {file: ./secrets/ca_passphrase.txt}
-# ...and under the service:  secrets: [certforge_admin, certforge_ca]
+#   certforge_acme_ca: {file: ./secrets/acme_ca_passphrase.txt}      # only with CERTFORGE_ACME_CA
+# ...and under the service:  secrets: [certforge_admin, certforge_ca, certforge_acme_ca]
 
 volumes:
   certforge-data:

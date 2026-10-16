@@ -6,6 +6,16 @@
 
 {% set st = ov.settings %}
 <section>
+  <h2>Who signs the certificates</h2>
+  {% if ov.ca %}
+    <p>{% if ov.ca.sealed %}<span class="status expired">Locked</span>{% else %}<span class="status valid">Ready</span>{% endif %}
+      A separate <strong>ACME issuing CA</strong> ({{ ov.ca.issuing.subject }}){% if ov.ca.mode == 'own-root' %} under its own root{% endif %}. <a href="/acme/ca">Manage it</a></p>
+  {% else %}
+    <p>Your main intermediate CA, <strong>{{ ov.main_subject }}</strong>, which has to stay unlocked for clients to renew. <a href="/acme/ca">Give ACME a CA of its own</a> to keep the main CA locked away.</p>
+  {% endif %}
+</section>
+
+<section>
   <h2>Address for ACME clients</h2>
   <div class="cmdrow"><pre class="cmd" id="acme-url">{{ acme_url }}</pre><button type="button" class="btn quiet small" data-copy="#acme-url">Copy</button></div>
   <p class="small">{% if st.enabled %}<span class="status valid">On</span>{% else %}<span class="status expired">Off</span>{% endif %}

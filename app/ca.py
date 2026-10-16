@@ -514,6 +514,96 @@ def csr_names(csr: x509.CertificateSigningRequest) -> tuple[Names, list[str]]:
 
 
 # --------------------------------------------------------------------------
+# Signing helpers shared by every authority (the main CA and the ACME issuing CA)
+# --------------------------------------------------------------------------
+
+def check_policy(permitted_dns: list[str], permitted_ips: list[str], names: Names, days: int | None = None) -> None:
+    """Refuse names outside what an authority is limited to, and validity periods that are out of range."""
+    nets = [ipaddress.ip_network(n) for n in permitted_ips]
+    if permitted_dns:
+        for d in names.dns:
+            base = d[2:] if d.startswith("*.") else d
+            if not any(base == p or base.endswith("." + p) for p in permitted_dns):
+                raise CAError(f"'{d}' is outside the domains this CA is limited to ({', '.join(permitted_dns)}).")
+    if nets:
+        for i in names.ips:
+            if not any(ipaddress.ip_address(i) in n for n in nets):
+                raise CAError(f"{i} is outside the IP ranges this CA is limited to ({', '.join(map(str, nets))}).")
+    if days is not None and not (1 <= days <= MAX_LEAF_DAYS):
+        raise CAError(f"Validity must be between 1 and {MAX_LEAF_DAYS} days.")
+
+
+def build_leaf(*, issuer_cert: x509.Certificate, issuer_key, public_key, names: Names, days: int, purpose: str,
+               public_host: str | None, issuer_file: str = "intermediate") -> tuple[x509.Certificate, list[str]]:
+    """A server/client certificate signed by `issuer_key`. The caller has already checked policy.
+    `issuer_file` names the /pki/ downloads (<name>.cer and <name>.crl) written into the certificate."""
+    if purpose not in PURPOSES:
+        raise CAError("Unknown certificate purpose.")
+    notices: list[str] = []
+    now = _now()
+    not_after = now + dt.timedelta(days=days)
+    cap = issuer_cert.not_valid_after_utc
+    if not_after > cap:
+        not_after = cap
+        notices.append(
+            "The validity was shortened because the CA's intermediate certificate "
+            f"expires on {cap:%Y-%m-%d}."
+        )
+    rsa_key = isinstance(public_key, rsa.RSAPublicKey)
+    b = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, names.cn())]))
+        .issuer_name(issuer_cert.subject)
+        .public_key(public_key)
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - BACKDATE).not_valid_after(not_after)
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(_ku(digital_signature=True, key_encipherment=rsa_key), critical=True)
+        .add_extension(x509.ExtendedKeyUsage(PURPOSES[purpose][1]), critical=False)
+        .add_extension(x509.SubjectAlternativeName(names.general_names()), critical=False)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(public_key), critical=False)
+        .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(issuer_cert.public_key()), critical=False)
+    )
+    if public_host:
+        base = f"http://{public_host}/pki"
+        b = b.add_extension(
+            x509.AuthorityInformationAccess([x509.AccessDescription(
+                AuthorityInformationAccessOID.CA_ISSUERS, x509.UniformResourceIdentifier(f"{base}/{issuer_file}.cer"))]),
+            critical=False)
+        b = b.add_extension(
+            x509.CRLDistributionPoints([x509.DistributionPoint(
+                full_name=[x509.UniformResourceIdentifier(f"{base}/{issuer_file}.crl")],
+                relative_name=None, reasons=None, crl_issuer=None)]),
+            critical=False)
+    cert = b.sign(issuer_key, _sig_hash(issuer_key))
+    cert.verify_directly_issued_by(issuer_cert)  # belt and braces
+    return cert, notices
+
+
+def build_crl(*, issuer_cert: x509.Certificate, issuer_key, number: int,
+              revoked: list[tuple[int, dt.datetime, str]]) -> x509.CertificateRevocationList:
+    now = _now()
+    b = (
+        x509.CertificateRevocationListBuilder()
+        .issuer_name(issuer_cert.subject)
+        .last_update(now).next_update(now + CRL_LIFETIME)
+        .add_extension(x509.CRLNumber(number), critical=False)
+        .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(issuer_cert.public_key()), critical=False)
+    )
+    for serial, when, reason in revoked:
+        rb = x509.RevokedCertificateBuilder().serial_number(serial).revocation_date(when)
+        flag = REASONS.get(reason, x509.ReasonFlags.unspecified)
+        if flag is not x509.ReasonFlags.unspecified:
+            rb = rb.add_extension(x509.CRLReason(flag), critical=False)
+        b = b.add_revoked_certificate(rb.build())
+    return b.sign(issuer_key, _sig_hash(issuer_key))
+
+
+def same_key(key, cert: x509.Certificate) -> bool:
+    return _spki(key.public_key()) == _spki(cert.public_key())
+
+
+# --------------------------------------------------------------------------
 # The authority
 # --------------------------------------------------------------------------
 
@@ -564,10 +654,10 @@ class CertAuthority:
 
     # ---- building certificates -----------------------------------------
     @staticmethod
-    def _build_root(key, org: str, years: int) -> x509.Certificate:
+    def _build_root(key, org: str, years: int, cn: str | None = None) -> x509.Certificate:
         name = x509.Name([
             x509.NameAttribute(NameOID.ORGANIZATION_NAME, org),
-            x509.NameAttribute(NameOID.COMMON_NAME, f"{org} Root CA"),
+            x509.NameAttribute(NameOID.COMMON_NAME, cn or f"{org} Root CA"),
         ])
         now = _now()
         return (
@@ -583,10 +673,10 @@ class CertAuthority:
 
     @staticmethod
     def _build_intermediate(root_key, root_cert, int_pub, org: str, years: int,
-                            permitted_dns: list[str], permitted_ips: list[str]) -> x509.Certificate:
+                            permitted_dns: list[str], permitted_ips: list[str], cn: str | None = None) -> x509.Certificate:
         name = x509.Name([
             x509.NameAttribute(NameOID.ORGANIZATION_NAME, org),
-            x509.NameAttribute(NameOID.COMMON_NAME, f"{org} Intermediate CA"),
+            x509.NameAttribute(NameOID.COMMON_NAME, cn or f"{org} Intermediate CA"),
         ])
         now = _now()
         not_after = min(now + dt.timedelta(days=int(years * 365.25)), root_cert.not_valid_after_utc)
@@ -695,9 +785,8 @@ class CertAuthority:
             except FileNotFoundError:
                 pass
 
-    def renew_intermediate(self, passphrase: str, root_key_pem: bytes | None = None, years: int = 10) -> x509.Certificate:
-        """Re-sign the existing intermediate key with the root (new validity period).
-        Certificates already issued stay valid: same name, same key."""
+    def load_root_key(self, passphrase: str, root_key_pem: bytes | None = None):
+        """The decrypted root key, from this server or from an uploaded backup. Proves the passphrase and the match."""
         with self.lock:
             if root_key_pem is None:
                 if not self.root_key_present():
@@ -706,6 +795,13 @@ class CertAuthority:
             root_key = load_encrypted_key(root_key_pem, passphrase)
             if _spki(root_key.public_key()) != _spki(self.root.public_key()):
                 raise CAError("That key isn't the key for this root certificate.")
+            return root_key
+
+    def renew_intermediate(self, passphrase: str, root_key_pem: bytes | None = None, years: int = 10) -> x509.Certificate:
+        """Re-sign the existing intermediate key with the root (new validity period).
+        Certificates already issued stay valid: same name, same key."""
+        with self.lock:
+            root_key = self.load_root_key(passphrase, root_key_pem)
             new = self._build_intermediate(
                 root_key, self.root, self.intermediate.public_key(), self.meta["org"], years,
                 self.meta.get("permitted_dns", []), self.meta.get("permitted_ips", []),
@@ -720,66 +816,14 @@ class CertAuthority:
 
     # ---- policy ---------------------------------------------------------
     def check_policy(self, names: Names, days: int | None = None) -> None:
-        pd = self.meta.get("permitted_dns", [])
-        pi = [ipaddress.ip_network(n) for n in self.meta.get("permitted_ips", [])]
-        if pd:
-            for d in names.dns:
-                base = d[2:] if d.startswith("*.") else d
-                if not any(base == p or base.endswith("." + p) for p in pd):
-                    raise CAError(f"'{d}' is outside the domains this CA is limited to ({', '.join(pd)}).")
-        if pi:
-            for i in names.ips:
-                if not any(ipaddress.ip_address(i) in n for n in pi):
-                    raise CAError(f"{i} is outside the IP ranges this CA is limited to ({', '.join(map(str, pi))}).")
-        if days is not None and not (1 <= days <= MAX_LEAF_DAYS):
-            raise CAError(f"Validity must be between 1 and {MAX_LEAF_DAYS} days.")
+        check_policy(self.meta.get("permitted_dns", []), self.meta.get("permitted_ips", []), names, days)
 
     # ---- issuing --------------------------------------------------------
     def _sign_leaf(self, public_key, names: Names, days: int, purpose: str) -> tuple[x509.Certificate, list[str]]:
         key = self._require_key()
-        if purpose not in PURPOSES:
-            raise CAError("Unknown certificate purpose.")
         self.check_policy(names, days)
-        notices: list[str] = []
-        now = _now()
-        not_after = now + dt.timedelta(days=days)
-        cap = self.intermediate.not_valid_after_utc
-        if not_after > cap:
-            not_after = cap
-            notices.append(
-                "The validity was shortened because the CA's intermediate certificate "
-                f"expires on {cap:%Y-%m-%d}."
-            )
-        rsa_key = isinstance(public_key, rsa.RSAPublicKey)
-        b = (
-            x509.CertificateBuilder()
-            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, names.cn())]))
-            .issuer_name(self.intermediate.subject)
-            .public_key(public_key)
-            .serial_number(x509.random_serial_number())
-            .not_valid_before(now - BACKDATE).not_valid_after(not_after)
-            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
-            .add_extension(_ku(digital_signature=True, key_encipherment=rsa_key), critical=True)
-            .add_extension(x509.ExtendedKeyUsage(PURPOSES[purpose][1]), critical=False)
-            .add_extension(x509.SubjectAlternativeName(names.general_names()), critical=False)
-            .add_extension(x509.SubjectKeyIdentifier.from_public_key(public_key), critical=False)
-            .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(self.intermediate.public_key()), critical=False)
-        )
-        host = self.public_host
-        if host:
-            base = f"http://{host}/pki"
-            b = b.add_extension(
-                x509.AuthorityInformationAccess([x509.AccessDescription(
-                    AuthorityInformationAccessOID.CA_ISSUERS, x509.UniformResourceIdentifier(f"{base}/intermediate.cer"))]),
-                critical=False)
-            b = b.add_extension(
-                x509.CRLDistributionPoints([x509.DistributionPoint(
-                    full_name=[x509.UniformResourceIdentifier(f"{base}/intermediate.crl")],
-                    relative_name=None, reasons=None, crl_issuer=None)]),
-                critical=False)
-        cert = b.sign(key, _sig_hash(key))
-        cert.verify_directly_issued_by(self.intermediate)  # belt and braces
-        return cert, notices
+        return build_leaf(issuer_cert=self.intermediate, issuer_key=key, public_key=public_key, names=names,
+                          days=days, purpose=purpose, public_host=self.public_host)
 
     def issue_generated(self, names: Names, days: int, purpose: str, key_type: str) -> Issued:
         """We make the key pair too. The private key is returned once and never stored."""
@@ -803,21 +847,7 @@ class CertAuthority:
         with self.lock:
             key = self._require_key()
             number = int(self.meta.get("crl_number", 0)) + 1
-            now = _now()
-            b = (
-                x509.CertificateRevocationListBuilder()
-                .issuer_name(self.intermediate.subject)
-                .last_update(now).next_update(now + CRL_LIFETIME)
-                .add_extension(x509.CRLNumber(number), critical=False)
-                .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(self.intermediate.public_key()), critical=False)
-            )
-            for serial, when, reason in revoked:
-                rb = x509.RevokedCertificateBuilder().serial_number(serial).revocation_date(when)
-                flag = REASONS.get(reason, x509.ReasonFlags.unspecified)
-                if flag is not x509.ReasonFlags.unspecified:
-                    rb = rb.add_extension(x509.CRLReason(flag), critical=False)
-                b = b.add_revoked_certificate(rb.build())
-            crl = b.sign(key, _sig_hash(key))
+            crl = build_crl(issuer_cert=self.intermediate, issuer_key=key, number=number, revoked=revoked)
             atomic_write(self.dir / "intermediate.crl", crl.public_bytes(serialization.Encoding.DER), 0o644)
             self.meta["crl_number"] = number
             atomic_write(self.dir / "meta.json", json.dumps(self.meta, indent=2).encode(), 0o644)

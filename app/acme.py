@@ -301,6 +301,8 @@ class Acme:
         q = self.store._q
         return {
             "settings": self.settings(),
+            "ca": self.svc.acme_ca_summary(),
+            "main_subject": C._cn(self.svc.ca.intermediate.subject) if self.svc.ca.loaded() else "",
             "eab": q("SELECT kid,label,created,account,revoked FROM acme_eab ORDER BY created DESC"),
             "accounts": q("SELECT a.id, a.contact, a.status, a.created, a.eab_kid, "
                           "(SELECT COUNT(*) FROM acme_orders o WHERE o.account=a.id AND o.status='valid') AS issued "
@@ -543,11 +545,12 @@ class Acme:
             raise AcmeError("malformed", f"At most {MAX_IDENTIFIERS} names per order.")
         st = self.settings()
         ids = list(dict.fromkeys(self._check_identifier(i, st) for i in p["identifiers"]))
+        _, issuer = self.svc.acme_issuer()
         try:
-            self.svc.ca.check_policy(C.parse_names([v for _, v in ids]), st.days)
+            issuer.check_policy(C.parse_names([v for _, v in ids]), st.days)
         except C.CAError as e:
             raise AcmeError("rejectedIdentifier", str(e)) from None
-        if not self.svc.ca.loaded() or self.svc.ca.sealed():
+        if not issuer.loaded() or issuer.sealed():
             raise AcmeError("serverInternal", "The CA is locked. An administrator must unlock it before certificates can be issued.", 503)
         pending = self.store._q("SELECT COUNT(*) AS n FROM acme_orders WHERE account=? AND status IN ('pending','ready')", (acct["id"],))[0]["n"]
         if pending >= 50 or not self.order_gate.allow(acct["id"]):
@@ -704,9 +707,7 @@ class Acme:
             raise AcmeError("badCSR", "The request must name exactly the identifiers in the order "
                                       f"({', '.join(sorted(v for _, v in want))}) in its subjectAltName.")
         try:
-            with self.svc.ca.lock:
-                issued = self.svc.ca.sign_csr(csr, C.parse_names([v for _, v in sorted(want)]), self.settings().days, "server")
-                rec = self.svc._record(issued.cert, "server", "acme", f"acme:{acct['id']}")
+            rec = self.svc.acme_issue(csr, C.parse_names([v for _, v in sorted(want)]), self.settings().days, f"acme:{acct['id']}")
         except C.CASealed:
             raise AcmeError("serverInternal", "The CA is locked. An administrator must unlock it.", 503) from None
         except C.CAError as e:
@@ -720,7 +721,7 @@ class Acme:
         if not row:
             raise AcmeError("malformed", "That order has no certificate (yet).", 404)
         leaf = x509.load_pem_x509_certificate(row["pem"].encode())
-        return Reply(200, C.chain_pem([leaf, self.svc.ca.intermediate]), {"Content-Type": "application/pem-certificate-chain"})
+        return Reply(200, C.chain_pem([leaf, *self.svc.issuer_chain(row)]), {"Content-Type": "application/pem-certificate-chain"})
 
     def _revoke(self, auth: Auth, base: str) -> Reply:
         p = auth.payload or {}

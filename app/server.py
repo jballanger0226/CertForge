@@ -220,6 +220,17 @@ def main() -> None:
         log(" Sign in with the admin password you provided. To stop keeping the")
         log(" passwords in the environment, remove them now; they aren't needed again.")
         log("=" * 64)
+    if cfg.acme_ca_auto and svc.is_setup() and not svc.acme_ca.initialized():
+        try:
+            svc.auto_acme_ca()
+        except C.CAError as e:
+            raise SystemExit(f"Automatic ACME CA setup failed: {e}")
+        log(f"The ACME issuing CA was created from its CERTFORGE_ACME_CA* settings ({svc.acme_ca.mode}).")
+    if svc.acme_ca.loaded():
+        if svc.acme_ca.sealed():
+            log("The ACME issuing CA is locked. Give the server CERTFORGE_ACME_CA_PASSPHRASE, or unlock it on the ACME CA page.")
+        else:
+            log("The ACME issuing CA is unlocked: ACME clients can get certificates.")
     if not svc.is_setup():
         first = (svc.initial_names().splitlines() or ["this-server"])[0]
         url = f"https://{first}" + ("" if cfg.https_port == 443 else f":{cfg.https_port}") + "/"

@@ -34,6 +34,9 @@ if [ ! -f /etc/certforge.env ]; then
     echo '# and the CA is created on the next start with no wizard. See the README.'
     echo '# CERTFORGE_ADMIN_PASSWORD='
     echo '# CERTFORGE_CA_PASSPHRASE='
+    echo '# A separate signing CA for ACME (intermediate = under your root, root = its own root). The passphrase unlocks it at every start:'
+    echo '# CERTFORGE_ACME_CA=intermediate'
+    echo '# CERTFORGE_ACME_CA_PASSPHRASE='
   } > /etc/certforge.env
 fi
 install -m 755 "$SRC/deploy/ct/certforge-code" /usr/local/bin/certforge-code

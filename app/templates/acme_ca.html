@@ -1,0 +1,246 @@
+{% extends "base.html" %}
+{% block title %}ACME issuing CA – {{ org }}{% endblock %}
+{% block content %}
+<h1>ACME issuing CA</h1>
+<p class="lede">A separate signing key for ACME clients. They renew by themselves, so the key has to be usable without anyone typing a passphrase. Keeping it apart means your main CA can stay locked, and a leak only affects ACME certificates.</p>
+
+{% macro key_choice(f) %}
+    <fieldset class="choice">
+      <legend>How is the issuing key unlocked after a restart?</legend>
+      <label class="check"><input type="radio" name="hold" value="secret"{% if f.hold != 'manual' %} checked{% endif %}>
+        <span><strong>From a secret you give the server</strong> (recommended). Docker secret, environment file or systemd credential. ACME keeps working after a reboot, and the data folder and its backups don't contain a usable key.</span></label>
+      <label class="check"><input type="radio" name="hold" value="manual"{% if f.hold == 'manual' %} checked{% endif %}>
+        <span><strong>By hand</strong>. Safer, but ACME stops after every restart until you sign in and enter the passphrase.</span></label>
+    </fieldset>
+{% endmacro %}
+
+{% if backup %}
+<section>
+  <h2>Download the new root's key</h2>
+  <p class="note warn">This is the only time the server offers it. It's encrypted with the root passphrase you just chose. Store it somewhere safe and offline: you'll need it to renew the issuing CA or to make a new one.</p>
+  <p><a class="btn" href="/acme/ca/root-key/download/{{ backup }}">Download encrypted root key</a></p>
+</section>
+{% endif %}
+
+{% if not s %}
+<section>
+  <h2>Where ACME certificates come from today</h2>
+  <p>ACME clients are signed by your main intermediate CA, <strong>{{ main.intermediate.subject }}</strong>. That works, but it means the main CA has to stay unlocked whenever a client renews.
+  Pick one of the two ways below to give ACME its own issuing CA.</p>
+</section>
+
+<section>
+  <h2>Signed by your existing root <span class="small">(recommended)</span></h2>
+  <p>Makes a second intermediate under the root you already have. Every device that trusts your root trusts these certificates straight away, so there is nothing new to install anywhere.</p>
+  <form method="post" action="/acme/ca/create" enctype="multipart/form-data" class="narrow">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <input type="hidden" name="mode" value="under-main">
+    <label for="u-main">Your CA passphrase <small>The one you chose at setup. It's used once, to sign with the root, and not kept.</small></label>
+    <input id="u-main" name="main_passphrase" type="password" autocomplete="off" required>
+    {% if not main.root_key_present %}
+    <label for="u-rk">Root key backup <small>The root key isn't on this server, so upload the encrypted file you downloaded earlier. It's used once.</small></label>
+    <input id="u-rk" name="root_key" type="file" required>
+    {% endif %}
+
+    <label for="u-pass">New passphrase for the ACME issuing key <small>At least 12 characters, and different from your CA passphrase.</small></label>
+    <input id="u-pass" name="passphrase" type="password" autocomplete="new-password" minlength="12" required>
+    <label for="u-pass2">Again</label>
+    <input id="u-pass2" name="passphrase2" type="password" autocomplete="new-password" minlength="12" required>
+
+    {{ key_choice(f) }}
+
+    <label for="u-perm">Limit it to these names <small>Domains and IP ranges, one per line. Blank means the same limits as your main CA. The issuing CA will refuse anything outside this, whatever the ACME settings say, so include everything you plan to allow.</small></label>
+    <textarea id="u-perm" name="permitted" autocomplete="off" autocapitalize="none" spellcheck="false">{{ f.permitted }}</textarea>
+
+    <details class="opts"><summary>More options</summary>
+      <label for="u-years">Lifetime, in years <small>Shorter than your root's remaining life. 5 is a good start; renewing keeps the same key.</small></label>
+      <input id="u-years" name="years" type="number" min="1" max="10" value="{{ f.years }}">
+      <label for="u-kt">Key type</label>
+      <select id="u-kt" name="key_type">{% for k, v in CA_KEY_TYPES.items() %}<option value="{{ k }}"{% if f.key_type == k %} selected{% endif %}>{{ v }}</option>{% endfor %}</select>
+    </details>
+    <div class="actions"><button class="btn" type="submit">Create the ACME issuing CA</button></div>
+  </form>
+</section>
+
+<section>
+  <h2>Give ACME its own root <span class="small">(advanced)</span></h2>
+  <p>For when ACME should be fully separate: its own name, lifetime and key type, or a different owner. It's a new two-level chain with a brand-new root that your main CA has nothing to do with.</p>
+  <details class="opts"{% if mode == 'own-root' %} open{% endif %}><summary>Set up a separate root and issuing CA</summary>
+    <p class="note info">What this costs you: every device and client that should trust ACME certificates has to install <em>this new root</em> as well as your existing one. The root key is shown to you once, for safekeeping, and by default isn't kept on the server.</p>
+    <form method="post" action="/acme/ca/create" class="narrow">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <input type="hidden" name="mode" value="own-root">
+      <label for="o-org">Name <small>The certificates will be called "<em>name</em> ACME Root CA" and "<em>name</em> ACME Issuing CA".</small></label>
+      <input id="o-org" name="org" value="{{ f.org }}" maxlength="40" required autocomplete="off">
+
+      <label for="o-rpass">Passphrase for the new root's key <small>At least 12 characters. It encrypts the root key you download, and is never kept on the server. Make it different from everything else.</small></label>
+      <input id="o-rpass" name="root_passphrase" type="password" autocomplete="new-password" minlength="12" required>
+
+      <label for="o-pass">Passphrase for the issuing key <small>At least 12 characters, and different from the root's.</small></label>
+      <input id="o-pass" name="passphrase" type="password" autocomplete="new-password" minlength="12" required>
+      <label for="o-pass2">Again</label>
+      <input id="o-pass2" name="passphrase2" type="password" autocomplete="new-password" minlength="12" required>
+
+      {{ key_choice(f) }}
+
+      <label for="o-perm">Limit it to these names <small>Domains and IP ranges, one per line. Blank means no limit; it's a good idea to set one.</small></label>
+      <textarea id="o-perm" name="permitted" autocomplete="off" autocapitalize="none" spellcheck="false">{{ f.permitted }}</textarea>
+
+      <label for="o-ry">Root lifetime, in years</label>
+      <input id="o-ry" name="root_years" type="number" min="5" max="30" value="{{ f.root_years }}">
+      <label for="o-y">Issuing CA lifetime, in years</label>
+      <input id="o-y" name="years" type="number" min="1" max="10" value="{{ f.years }}">
+      <label for="o-kt">Key type</label>
+      <select id="o-kt" name="key_type">{% for k, v in CA_KEY_TYPES.items() %}<option value="{{ k }}"{% if f.key_type == k %} selected{% endif %}>{{ v }}</option>{% endfor %}</select>
+
+      <label class="check"><input type="checkbox" name="keep_root_key" value="1"><span>Also keep the root key on this server (encrypted). Easier to renew later, but a break-in could reach it. Leave this off if you'll store the download safely.</span></label>
+      <div class="actions"><button class="btn" type="submit">Create root and issuing CA</button></div>
+    </form>
+  </details>
+</section>
+
+{% else %}
+<section>
+  <h2>Status</h2>
+  {% if s.sealed %}
+    <p class="note warn" id="unlock">The issuing key is locked, so ACME clients can't get certificates. {% if s.hold == 'secret' %}It should unlock by itself at start from the passphrase you give the server, and that didn't happen (see below), so unlock it by hand for now.{% else %}It's set to be unlocked by hand after every restart.{% endif %}</p>
+    <form method="post" action="/acme/ca/unlock" class="narrow">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <label for="un">ACME issuing passphrase</label>
+      <input id="un" name="passphrase" type="password" autocomplete="off" required>
+      <div class="actions"><button class="btn" type="submit">Unlock</button></div>
+    </form>
+  {% else %}
+    <p class="note ok">Unlocked. ACME clients get their certificates from this CA{% if s.mode == 'under-main' %}, and your main CA's key isn't involved{% endif %}.</p>
+  {% endif %}
+  <dl class="facts">
+    <dt>Kind</dt><dd>{% if s.mode == 'under-main' %}Signed by your existing root{% else %}Its own separate root{% endif %}</dd>
+    <dt>Certificates issued</dt><dd>{{ s.issued }}</dd>
+    <dt>Limited to</dt><dd>{{ s.permitted|join(', ') or 'no name limits' }}</dd>
+    <dt>Key unlocked</dt><dd>{% if s.hold == 'secret' %}from a secret given to the server{% else %}by hand after each restart{% endif %}</dd>
+  </dl>
+  {% if s.uncovered %}
+    <p class="note warn">The ACME settings allow {{ s.uncovered|join(', ') }}, which this CA's limits exclude, so clients asking for those are refused. Limits are written into the CA's certificate: to widen them, retire this CA and make a new one.</p>
+  {% endif %}
+  {% if s.hold == 'secret' %}
+  <h3>The secret</h3>
+  {% if s.secret_configured %}
+    <p>This server was started with a passphrase for it, so it unlocks itself at start.</p>
+  {% else %}
+    <p class="note warn">This server wasn't started with the passphrase, so after a restart it stays locked. Give it the passphrase you chose:</p>
+  {% endif %}
+  <div class="cmdrow"><pre class="cmd" id="c-secret"># Docker / Compose
+environment:
+  CERTFORGE_ACME_CA_PASSPHRASE_FILE: /run/secrets/acme_ca_passphrase
+
+# Proxmox container or plain Linux (/etc/certforge/env, readable by root only)
+CERTFORGE_ACME_CA_PASSPHRASE=the passphrase you chose</pre><button type="button" class="btn quiet small" data-copy="#c-secret">Copy</button></div>
+  <p class="small">Anyone who can read that secret can use the ACME issuing key, but only that key, and only for the names it's limited to.</p>
+  {% endif %}
+</section>
+
+<section>
+  <h2>Chain of trust</h2>
+  <div class="dl">
+    {% for label, c in [('Root CA' ~ (' (shared with your main CA)' if s.mode == 'under-main' else ' (ACME only)'), s.root), ('ACME issuing CA', s.issuing)] %}
+    <div>
+      <h3>{{ label }}</h3>
+      <dl class="facts">
+        <dt>Name</dt><dd>{{ c.subject }}</dd>
+        <dt>Valid until</dt><dd>{{ c.not_after|date }}</dd>
+        <dt>Key</dt><dd>{{ c.key }}</dd>
+        <dt>Fingerprint</dt><dd class="hex">{% for line in c.sha256|fp_lines %}{{ line }}<br>{% endfor %}</dd>
+      </dl>
+    </div>
+    {% endfor %}
+  </div>
+  {% if s.mode == 'own-root' %}
+    <h3 class="mt">Make clients trust it</h3>
+    <p>ACME clients and the machines that talk to them must trust <strong>this</strong> root, in addition to your main one. It has its own downloads:</p>
+    <ul class="links">
+      <li><a href="/pki/acme-root.crt">ACME root certificate (.crt)</a></li>
+      <li><a href="/pki/acme-root.cer">ACME root, binary (.cer)</a> <span class="small">Windows and Java</span></li>
+      <li><a href="/pki/acme-root.mobileconfig">Apple profile (.mobileconfig)</a></li>
+      <li><a href="/pki/acme-intermediate.crt">Issuing CA (.crt)</a> <span class="small">only if a server isn't sending its chain</span></li>
+      <li><a href="/pki/acme-chain.pem">Both together (.pem)</a></li>
+    </ul>
+    <p class="small">Installing works exactly like <a href="/trust">on the trust page</a>, with these files instead.</p>
+  {% else %}
+    <p class="mt">Devices that already trust your root need nothing more. If a server isn't sending its chain, <a href="/pki/acme-intermediate.crt">the issuing CA</a> can be downloaded.</p>
+  {% endif %}
+</section>
+
+<section>
+  <h2>Revocation list</h2>
+  {% if s.crl %}
+    <dl class="facts">
+      <dt>Address</dt><dd class="hex">http://{{ main.public_host }}/pki/acme-intermediate.crl</dd>
+      <dt>Revoked certificates</dt><dd>{{ s.crl.count }}</dd>
+      <dt>Last updated</dt><dd>{{ s.crl.last_update|datetime }}</dd>
+      <dt>Refreshes before</dt><dd>{{ s.crl.next_update|datetime }}</dd>
+    </dl>
+  {% else %}
+    <p>No revocation list yet. It appears once the CA is unlocked.</p>
+  {% endif %}
+  <p class="small mt">Revoking an ACME certificate, from a client or from the certificates list, goes on this list and not on the main CA's.</p>
+</section>
+
+{% if s.mode == 'own-root' %}
+<section>
+  <h2>The ACME root key</h2>
+  {% if s.root_key_present %}
+    <p class="note warn">The root key is on this server, encrypted with the root passphrase. It's only needed to renew the issuing CA, so the safest place for it is somewhere else.</p>
+    <form method="post" action="/acme/ca/root-key/export" class="narrow">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <label for="re-pass">Root passphrase</label>
+      <input id="re-pass" name="passphrase" type="password" autocomplete="off" required>
+      <div class="actions"><button class="btn quiet" type="submit">Download encrypted backup</button></div>
+    </form>
+    <details class="opts"><summary>Remove the root key from this server</summary>
+      <p>Your backup becomes the only copy. You'll upload it again to renew the issuing CA.</p>
+      {% if not s.root_key_exported %}<p class="note warn">Download the backup above first. Removal is blocked until you have.</p>{% endif %}
+      <form method="post" action="/acme/ca/root-key/remove" class="narrow">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <label for="rr-confirm">Type <strong>remove acme root key</strong> to confirm</label>
+        <input id="rr-confirm" name="confirm" autocomplete="off" required>
+        <div class="actions"><button class="btn danger" type="submit">Remove root key</button></div>
+      </form>
+    </details>
+  {% else %}
+    <p class="note ok">The root key is not on this server. That's the safest setup. Keep your backup somewhere secure.</p>
+  {% endif %}
+</section>
+{% endif %}
+
+<section>
+  <h2>Renew</h2>
+  <p>The issuing CA expires on {{ s.issuing.not_after|date }}. Renewing signs it again with the root, with the same name and key, so every certificate it issued keeps working.</p>
+  <form method="post" action="/acme/ca/renew" enctype="multipart/form-data" class="narrow">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label for="rn-pass">{% if s.mode == 'under-main' %}Your CA passphrase{% else %}Root passphrase{% endif %}</label>
+    <input id="rn-pass" name="passphrase" type="password" autocomplete="off" required>
+    <label for="rn-years">New lifetime, in years</label>
+    <input id="rn-years" name="years" type="number" min="1" max="10" value="5">
+    {% if (s.mode == 'under-main' and not main.root_key_present) or (s.mode == 'own-root' and not s.root_key_present) %}
+      <label for="rn-key">Root key backup <small>The file you downloaded earlier. It stays encrypted and is used once.</small></label>
+      <input id="rn-key" name="root_key" type="file" required>
+    {% endif %}
+    <div class="actions"><button class="btn quiet" type="submit">Renew</button></div>
+  </form>
+</section>
+
+<section>
+  <h2>Retire</h2>
+  <p>Puts this ACME CA, keys included, into a folder on the server and turns ACME off, so nothing quietly falls back to a different CA. Certificates it issued stay valid until they expire. You can then turn ACME on again with your main CA, or make a new ACME issuing CA.</p>
+  <details class="opts"><summary>Retire the ACME issuing CA</summary>
+    <p class="note warn">Its revocation list stops being updated, so certificates issued by it can no longer be revoked from here.</p>
+    <form method="post" action="/acme/ca/retire" class="narrow">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <label for="rt-confirm">Type <strong>retire acme ca</strong> to confirm</label>
+      <input id="rt-confirm" name="confirm" autocomplete="off" required>
+      <div class="actions"><button class="btn danger" type="submit">Retire</button></div>
+    </form>
+  </details>
+</section>
+{% endif %}
+{% endblock %}

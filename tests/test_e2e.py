@@ -839,5 +839,343 @@ class TestAcmeOverHttps(Base):
         self.assertEqual(requests.get(f"{self.base}/acme/directory", verify=str(self.root)).status_code, 200)
 
 
+class AcmeCaBase(Base):
+    """Shared plumbing for the ACME issuing CA tests: a zero-touch server with ACME on, and a real client."""
+
+    PORT = 0
+    new_client = TestAcmeOverHttps.new_client
+
+    def serving(self, client):
+        """Port 80 on this machine's address answers ACME challenges until the block ends."""
+        import contextlib
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = client.key_authorization(self.path.rsplit("/", 1)[-1]).encode()
+                self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        @contextlib.contextmanager
+        def run():
+            srv = HTTPServer((self.ip, 80), H)
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            try:
+                yield
+            finally:
+                srv.shutdown()
+                srv.server_close()
+        return run()
+
+    @classmethod
+    def setUpClass(cls):
+        from app import netinfo
+        ips = netinfo.local_ips()
+        if not ips:
+            raise unittest.SkipTest("no non-loopback address to validate against")
+        cls.ip = ips[0]
+        cls.boot(https=cls.PORT, http=0, token=None, verify_with_root=True, env={
+            "CERTFORGE_ADMIN_PASSWORD": ADMIN, "CERTFORGE_CA_PASSPHRASE": PASS, "CERTFORGE_ORG": "Split Lab",
+            "CERTFORGE_SEAL": "true", "CERTFORGE_ACME_NETWORKS": f"{cls.ip}/32"})
+
+    def restart(self, **env):
+        self.srv.stop()
+        self.srv.extra_env = {k: v for k, v in {**self.srv.extra_env, **env}.items() if v is not None}
+        self.srv.start()
+        self.srv.wait(self.root)
+
+    def order_certificate(self):
+        """A full ACME order for this machine's address. Returns (client, [leaf, issuing CA])."""
+        from tests.acme_client import make_csr
+        c, _ = self.new_client()
+        r = c.new_order([{"type": "ip", "value": self.ip}])
+        self.assertEqual(r.status, 201, r.body)
+        url = r.headers["location"]
+        z = c.poll(c.poll(url).json()["authorizations"][0]).json()
+        with self.serving(c):
+            self.assertEqual(c.poke(z["challenges"][0]["url"]).status, 200)
+            end = time.time() + 15
+            while time.time() < end and c.poll(url).json()["status"] not in ("ready", "invalid"):
+                time.sleep(0.2)
+        order = c.poll(url).json()
+        self.assertEqual(order["status"], "ready", order)
+        order = c.finalize(order, make_csr([self.ip])[0]).json()
+        self.assertEqual(order["status"], "valid", order)
+        return c, x509.load_pem_x509_certificates(c.post(order["certificate"], None).body)
+
+    def verify_chain(self, certs, root_path):
+        inter = self.tmpfile("acme-inter.pem", certs[1].public_bytes(serialization.Encoding.PEM))
+        leaf = self.tmpfile("acme-leaf.pem", certs[0].public_bytes(serialization.Encoding.PEM))
+        return sh("openssl", "verify", "-CAfile", str(root_path), "-untrusted", inter, "-purpose", "sslserver",
+                  "-verify_ip", self.ip, leaf, check=False)
+
+    def create_form(self, **over):
+        data = dict(mode="under-main", main_passphrase=PASS, passphrase="acme-issuing-passphrase-1", passphrase2="acme-issuing-passphrase-1",
+                    hold="secret", years="3", key_type="ec-p384", permitted=f"{self.ip}/32")
+        data.update(over)
+        return data
+
+
+class TestAcmeCaSignedByTheMainRoot(AcmeCaBase):
+    PORT = 8448
+    ACME_PASS = "acme-issuing-passphrase-1"
+
+    def test_1_the_page_offers_both_ways_and_acme_uses_the_main_ca_for_now(self):
+        w = self.login()
+        page = T(w.get(f"{self.base}/acme/ca"))
+        self.assertIn("Signed by your existing root", page)
+        self.assertIn("Give ACME its own root", page)
+        self.assertIn("Your main intermediate CA", T(w.get(f"{self.base}/acme")))
+        self.assertIn("separate ACME issuing CA", T(w.get(f"{self.base}/")))         # the dashboard nudges
+        anon = requests.get(f"{self.base}/acme/ca", verify=str(self.root), allow_redirects=False)
+        self.assertEqual((anon.status_code, anon.headers["Location"].startswith("/login")), (303, True))
+        anon = requests.post(f"{self.base}/acme/ca/create", data={"mode": "under-main"}, verify=str(self.root), allow_redirects=False)
+        self.assertEqual(anon.status_code, 303)
+
+    def test_2_mistakes_are_explained_and_nothing_is_created(self):
+        w = self.login()
+        for over, why in ((dict(main_passphrase="not the ca passphrase"), "didn't unlock"),
+                          (dict(passphrase2="something else entirely"), "don't match"),
+                          (dict(passphrase=PASS, passphrase2=PASS), "different passphrase"),
+                          (dict(passphrase=ADMIN, passphrase2=ADMIN), "admin login"),
+                          (dict(mode="sideways"), "Choose how"),
+                          (dict(years="soon"), "whole number")):
+            r = self.post(w, "/acme/ca/create", data=self.create_form(**over))
+            self.assertEqual(r.status_code, 400, (over, r.text[:300]))
+            self.assertIn(why, T(r), over)
+            if over.get("main_passphrase"):
+                self.assertNotIn(over["main_passphrase"], r.text)          # secrets are never echoed back
+        self.assertFalse((self.data / "acme-ca").exists())
+
+    def test_3_create_it_and_get_a_certificate_from_it(self):
+        w = self.login()
+        r = self.post(w, "/acme/ca/create", data=self.create_form())
+        self.assertEqual((r.status_code, r.headers["Location"]), (303, "/acme/ca"), r.text[:300])
+        page = T(w.get(f"{self.base}/acme/ca"))
+        self.assertIn("Unlocked.", page)
+        self.assertIn("Signed by your existing root", page)
+        self.assertNotIn("Download the new root", page)
+        self.assertIn(b"ENCRYPTED PRIVATE KEY", (self.data / "acme-ca" / "issuing.key").read_bytes())
+        self.assertEqual((self.data / "acme-ca").stat().st_mode & 0o777, 0o700)
+        self.assertEqual((self.data / "acme-ca" / "issuing.key").stat().st_mode & 0o777, 0o600)
+        self.assertNotIn("Your main intermediate CA", T(w.get(f"{self.base}/acme")))
+
+        _, certs = self.order_certificate()
+        r = self.verify_chain(certs, self.root)                 # it chains to the very same root as everything else
+        self.assertEqual(r.returncode, 0, r.stdout.decode() + r.stderr.decode())
+        self.assertEqual(certs[1].subject.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME)[0].value, "Split Lab ACME Issuing CA")
+        self.assertNotEqual(certs[1].fingerprint(hashes.SHA256()),
+                            x509.load_pem_x509_certificate((self.data / "ca" / "intermediate.crt").read_bytes()).fingerprint(hashes.SHA256()))
+        self.assertIn("ACME client", T(w.get(f"{self.base}/certs")))
+
+        crl = requests.get(f"{self.base}/pki/acme-intermediate.crl", verify=str(self.root))
+        self.assertEqual((crl.status_code, crl.headers["Content-Type"]), (200, "application/pkix-crl"))
+        x509.load_der_x509_crl(crl.content)
+        self.assertEqual(requests.get(f"{self.base}/pki/acme-root.crt", verify=str(self.root)).status_code, 200)
+
+    def test_4_after_a_restart_it_unlocks_from_the_secret_or_by_hand(self):
+        self.restart()                                         # no secret given
+        w = self.login()
+        self.assertIn("The ACME issuing CA is locked", T(w.get(f"{self.base}/")))
+        self.assertIn("The issuing key is locked", T(w.get(f"{self.base}/acme/ca")))
+        c, _ = self.new_client()
+        self.assertEqual(c.new_order([{"type": "ip", "value": self.ip}]).status, 503)
+        self.post(w, "/acme/ca/unlock", data=dict(passphrase="wrong passphrase here"))
+        self.assertIn("didn't unlock", T(w.get(f"{self.base}/acme/ca")))
+        self.post(w, "/acme/ca/unlock", data=dict(passphrase=self.ACME_PASS))
+        self.assertIn("Unlocked.", T(w.get(f"{self.base}/acme/ca")))
+        self.assertEqual(len(self.order_certificate()[1]), 2)
+
+        self.restart(CERTFORGE_ACME_CA_PASSPHRASE=self.ACME_PASS)          # now give the server the secret
+        self.assertIn("ACME issuing CA is unlocked", self.srv.log_path.read_text())
+        self.assertNotIn(self.ACME_PASS, self.srv.log_path.read_text())
+        w = self.login()
+        self.assertNotIn("ACME issuing CA is locked", T(w.get(f"{self.base}/")))
+        self.assertEqual(len(self.order_certificate()[1]), 2)
+
+    def test_5_the_main_ca_can_stay_locked_while_acme_works(self):
+        self.restart(CERTFORGE_ACME_CA_PASSPHRASE=self.ACME_PASS, CERTFORGE_ADMIN_PASSWORD=None, CERTFORGE_CA_PASSPHRASE=None)
+        w = self.login()
+        self.assertIn("The CA is locked", T(w.get(f"{self.base}/")))       # the main CA needs its passphrase...
+        self.assertEqual(len(self.order_certificate()[1]), 2)               # ...and ACME doesn't care
+
+    def test_6_renew_and_retire(self):
+        w = self.login()
+        self.post(w, "/acme/ca/renew", data=dict(passphrase="wrong wrong wrong", years="4"))
+        self.assertIn("didn't unlock", T(w.get(f"{self.base}/acme/ca")))
+        before = x509.load_pem_x509_certificate((self.data / "acme-ca" / "issuing.crt").read_bytes())
+        self.post(w, "/acme/ca/renew", data=dict(passphrase=PASS, years="4"))
+        self.assertIn("has been renewed", T(w.get(f"{self.base}/acme/ca")))
+        after = x509.load_pem_x509_certificate((self.data / "acme-ca" / "issuing.crt").read_bytes())
+        self.assertGreater(after.not_valid_after_utc, before.not_valid_after_utc)
+        self.assertEqual(after.public_key().public_numbers(), before.public_key().public_numbers())
+
+        self.post(w, "/acme/ca/retire", data=dict(confirm="nope"))
+        self.assertIn("Type retire acme ca", T(w.get(f"{self.base}/acme/ca")))
+        self.assertTrue((self.data / "acme-ca").exists())
+        self.post(w, "/acme/ca/retire", data=dict(confirm="retire acme ca"))
+        page = T(w.get(f"{self.base}/acme/ca"))
+        self.assertIn("ACME is turned off", page)
+        self.assertIn("Signed by your existing root", page)                  # and a new one can be made
+        self.assertFalse((self.data / "acme-ca").exists())
+        self.assertTrue(list((self.data / "acme-ca-retired").glob("*/issuing.key")))
+        self.assertEqual(requests.get(f"{self.base}/acme/directory", verify=str(self.root)).status_code, 404)
+
+
+class TestAcmeCaWithItsOwnRoot(AcmeCaBase):
+    PORT = 8449
+    ROOT_PASS = "acme-root-passphrase-xyz"
+    ACME_PASS = "acme-issuing-passphrase-2"
+
+    def own_form(self, **over):
+        data = dict(mode="own-root", org="Edge Lab", root_passphrase=self.ROOT_PASS, passphrase=self.ACME_PASS,
+                    passphrase2=self.ACME_PASS, hold="manual", root_years="15", years="4", key_type="ec-p384",
+                    permitted=f"{self.ip}/32")
+        data.update(over)
+        return data
+
+    def test_1_rules(self):
+        w = self.login()
+        for over, why in ((dict(passphrase=self.ROOT_PASS, passphrase2=self.ROOT_PASS), "different passphrase"),
+                          (dict(root_years="3"), "root lifetime"), (dict(org="<b>"), "CA name"),
+                          (dict(root_passphrase="short"), "at least")):
+            r = self.post(w, "/acme/ca/create", data=self.own_form(**over))
+            self.assertEqual(r.status_code, 400, (over, r.text[:200]))
+            self.assertIn(why, T(r), over)
+        self.assertFalse((self.data / "acme-ca").exists())
+
+    def test_2_create_download_the_root_key_once_and_trust_the_new_root(self):
+        w = self.login()
+        r = self.post(w, "/acme/ca/create", data=self.own_form())
+        self.assertEqual(r.status_code, 303, r.text[:300])
+        m = re.fullmatch(r"/acme/ca\?backup=([\w-]+)", r.headers["Location"])
+        self.assertTrue(m, r.headers["Location"])
+        page = T(w.get(f"{self.base}{r.headers['Location']}"))
+        self.assertIn("Download encrypted root key", page)
+        self.assertIn("Its own separate root", page)
+        self.assertFalse((self.data / "acme-ca" / "root.key").exists())      # the server holds no copy
+
+        dl = w.get(f"{self.base}/acme/ca/root-key/download/{m.group(1)}")
+        self.assertEqual(dl.status_code, 200)
+        self.assertIn('filename="edge_lab-acme-root-ca.key.enc"', dl.headers["Content-Disposition"])
+        self.assertIn(b"ENCRYPTED PRIVATE KEY", dl.content)
+        key = serialization.load_pem_private_key(dl.content, self.ROOT_PASS.encode())
+        acme_root = x509.load_pem_x509_certificate((self.data / "acme-ca" / "root.crt").read_bytes())
+        self.assertEqual(key.public_key().public_numbers(), acme_root.public_key().public_numbers())
+        again = w.get(f"{self.base}/acme/ca/root-key/download/{m.group(1)}", allow_redirects=True)
+        self.assertIn("expired or was already used", T(again))
+        self.__class__.root_backup = dl.content
+
+        # nobody else can fetch a backup token
+        other = self.login()
+        self.assertEqual(other.get(f"{self.base}/acme/ca/root-key/download/not-a-token", allow_redirects=False).status_code, 303)
+
+        # the trust page and the downloads carry the new root, distinct from the main one
+        trust = T(requests.get(f"{self.base}/trust", verify=str(self.root)))
+        self.assertIn("For machines that use ACME", trust)
+        self.assertIn("Edge Lab ACME Root CA", trust)
+        got = requests.get(f"{self.base}/pki/acme-root.crt", verify=str(self.root))
+        self.assertEqual(x509.load_pem_x509_certificate(got.content).subject, acme_root.subject)
+        self.assertNotEqual(got.content, requests.get(f"{self.base}/pki/root.crt", verify=str(self.root)).content)
+        self.assertEqual(requests.get(f"{self.base}/pki/acme-root.mobileconfig", verify=str(self.root)).status_code, 200)
+
+    def test_3_certificates_verify_against_the_new_root_and_not_the_main_one(self):
+        self.restart()
+        w = self.login()
+        self.post(w, "/acme/ca/unlock", data=dict(passphrase=self.ACME_PASS))       # hold=manual: by hand
+        _, certs = self.order_certificate()
+        new_root = self.data / "acme-ca" / "root.crt"
+        ok = self.verify_chain(certs, new_root)
+        self.assertEqual(ok.returncode, 0, ok.stdout.decode() + ok.stderr.decode())
+        self.assertNotEqual(self.verify_chain(certs, self.root).returncode, 0)
+        self.assertIn("Edge Lab ACME Issuing CA", certs[0].issuer.rfc4514_string())
+
+    def test_4_renewing_needs_the_root_key_backup(self):
+        w = self.login()
+        self.post(w, "/acme/ca/renew", data=dict(passphrase=self.ROOT_PASS, years="6"))
+        self.assertIn("root key isn't on this server", T(w.get(f"{self.base}/acme/ca")))
+        before = x509.load_pem_x509_certificate((self.data / "acme-ca" / "issuing.crt").read_bytes())
+        self.post(w, "/acme/ca/renew", data=dict(passphrase=self.ROOT_PASS, years="6"),
+                  files={"root_key": ("root.key.enc", self.root_backup)})
+        self.assertIn("has been renewed", T(w.get(f"{self.base}/acme/ca")))
+        after = x509.load_pem_x509_certificate((self.data / "acme-ca" / "issuing.crt").read_bytes())
+        self.assertGreater(after.not_valid_after_utc, before.not_valid_after_utc)
+        after.verify_directly_issued_by(x509.load_pem_x509_certificate((self.data / "acme-ca" / "root.crt").read_bytes()))
+        # a different key is refused
+        other_key = C_encrypt(self.ROOT_PASS)
+        self.post(w, "/acme/ca/renew", data=dict(passphrase=self.ROOT_PASS, years="6"), files={"root_key": ("x.enc", other_key)})
+        self.assertIn("isn't the key for this", T(w.get(f"{self.base}/acme/ca")))
+
+
+class TestZeroTouchAcmeCa(AcmeCaBase):
+    """CERTFORGE_ACME_CA=...: the issuing CA exists before the first request, and unlocks itself on every start."""
+
+    PORT = 8450
+    SECRET = "acme-issuing-passphrase-3"
+
+    @classmethod
+    def setUpClass(cls):
+        from app import netinfo
+        ips = netinfo.local_ips()
+        if not ips:
+            raise unittest.SkipTest("no non-loopback address to validate against")
+        cls.ip = ips[0]
+        secretdir = Path(tempfile.mkdtemp(prefix="certforge-secrets-"))
+        cls.addClassCleanup(shutil.rmtree, secretdir, ignore_errors=True)
+        (secretdir / "acme").write_text(cls.SECRET + "\n")
+        cls.boot(https=cls.PORT, http=0, token=None, verify_with_root=True, env={
+            "CERTFORGE_ADMIN_PASSWORD": ADMIN, "CERTFORGE_CA_PASSPHRASE": PASS, "CERTFORGE_ORG": "Auto Split",
+            "CERTFORGE_SEAL": "true", "CERTFORGE_ACME_NETWORKS": f"{cls.ip}/32", "CERTFORGE_ACME_CA": "intermediate",
+            "CERTFORGE_ACME_CA_PASSPHRASE_FILE": str(secretdir / "acme"), "CERTFORGE_ACME_CA_PERMITTED": f"{cls.ip}/32"})
+
+    def test_1_created_at_start_and_issuing(self):
+        log = self.srv.log_path.read_text()
+        self.assertIn("ACME issuing CA was created", log)
+        self.assertIn("ACME issuing CA is unlocked", log)
+        self.assertNotIn(self.SECRET, log)
+        self.assertNotIn(PASS, log)
+        c, certs = self.order_certificate()
+        self.assertEqual(self.verify_chain(certs, self.root).returncode, 0)
+        self.assertIn("Auto Split ACME Issuing CA", certs[0].issuer.rfc4514_string())
+
+    def test_2_every_restart_unlocks_it_without_anyone_there(self):
+        self.restart(CERTFORGE_ADMIN_PASSWORD=None, CERTFORGE_CA_PASSPHRASE=None)     # main CA now sealed, as in real life
+        self.assertEqual(len(self.order_certificate()[1]), 2)
+        w = self.login()
+        page = T(w.get(f"{self.base}/acme/ca"))
+        self.assertIn("so it unlocks itself at start", page)
+        self.assertIn("Unlocked.", page)
+
+
+class TestBadAcmeCaSettingsFailLoudly(unittest.TestCase):
+    def run_server(self, **env):
+        with tempfile.TemporaryDirectory() as d:
+            e = {**os.environ, "CERTFORGE_DATA": d, "CERTFORGE_HTTPS_PORT": "8451", "CERTFORGE_HTTP_PORT": "0",
+                 "CERTFORGE_ADMIN_PASSWORD": ADMIN, "CERTFORGE_CA_PASSPHRASE": PASS, **env}
+            return subprocess.run([sys.executable, "-m", "app.server"], cwd=ROOT, env=e, capture_output=True, text=True, timeout=90)
+
+    def test_a_weak_or_reused_passphrase_stops_the_server_with_a_reason(self):
+        p = self.run_server(CERTFORGE_ACME_CA="intermediate", CERTFORGE_ACME_CA_PASSPHRASE="short")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("Automatic ACME CA setup failed", p.stderr + p.stdout)
+        self.assertIn("at least", p.stderr + p.stdout)
+        p = self.run_server(CERTFORGE_ACME_CA="intermediate", CERTFORGE_ACME_CA_PASSPHRASE=PASS)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("different passphrase", p.stderr + p.stdout)
+
+    def test_a_missing_piece_is_named(self):
+        p = self.run_server(CERTFORGE_ACME_CA="root", CERTFORGE_ACME_CA_PASSPHRASE="a-long-enough-passphrase")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("CERTFORGE_ACME_ROOT_PASSPHRASE", p.stderr + p.stdout)
+
+
+def C_encrypt(passphrase: str) -> bytes:
+    from app import ca
+    return ca.encrypt_key(ca.generate_key("ec-p384"), passphrase)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

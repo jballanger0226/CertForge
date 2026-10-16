@@ -235,7 +235,7 @@ def create_app(svc: Service) -> Starlette:
     async def trust(request):
         if not svc.is_setup():
             return go("/setup")
-        return render(request, "trust.html", ca=svc.ca_summary(), slug=C.slugify(svc.ca.meta["org"]))
+        return render(request, "trust.html", ca=svc.ca_summary(), slug=C.slugify(svc.ca.meta["org"]), acme_ca=svc.acme_ca_summary())
 
     # ---- setup / login ----------------------------------------------------------
     def setup_defaults(host: str) -> tuple[dict, dict]:
@@ -560,6 +560,105 @@ def create_app(svc: Service) -> Starlette:
         await run_in_threadpool(svc.acme.deactivate_account, "admin", request.path_params["id"])
         return "Account deactivated. Its certificates stay valid until they expire or you revoke them."
 
+    # ---- the ACME issuing CA --------------------------------------------------------------------
+    def acme_ca_context(request, **over) -> dict:
+        st = svc.acme.settings()
+        backup = request.query_params.get("backup", "")
+        item = svc.root_backups.get(backup) if backup else None
+        ctx = {"s": svc.acme_ca_summary(), "main": svc.ca_summary(), "backup": backup if item and item["owner"] == sid(request) else "",
+               "f": {"permitted": "\n".join([*st.domains, *st.networks]), "org": svc.ca.meta["org"], "years": 5, "root_years": 20,
+                     "key_type": "ec-p384", "hold": "secret"}}
+        ctx.update(over)
+        return ctx
+
+    async def upload(form, key: str) -> bytes | None:
+        up = form.get(key)
+        return await up.read(20000) if up is not None and not isinstance(up, str) and getattr(up, "filename", "") else None
+
+    @authed
+    async def acme_ca_page(request):
+        return render(request, "acme_ca.html", **acme_ca_context(request))
+
+    @authed
+    async def acme_ca_create(request):
+        form = await read_form(request)
+        mode = str(form.get("mode", ""))
+        f = {"permitted": str(form.get("permitted", "")), "org": str(form.get("org", "")).strip(), "key_type": str(form.get("key_type", "ec-p384")),
+             "hold": str(form.get("hold", "secret"))}
+        root_key = await upload(form, "root_key")
+        try:
+            f["years"] = intval(form, "years", 5, "The issuing CA lifetime")
+            f["root_years"] = intval(form, "root_years", 20, "The root lifetime")
+            token = await run_in_threadpool(lambda: svc.acme_ca_create(
+                "admin", sid(request), mode=mode, passphrase=str(form.get("passphrase", "")), passphrase2=str(form.get("passphrase2", "")),
+                hold=f["hold"], key_type=f["key_type"], years=f["years"], permitted=f["permitted"],
+                main_passphrase=str(form.get("main_passphrase", "")), root_key_pem=root_key,
+                org=f["org"], root_passphrase=str(form.get("root_passphrase", "")), root_years=f["root_years"],
+                keep_root_key=bool(form.get("keep_root_key"))))
+        except C.CAError as e:
+            flash(request, "error", str(e))
+            ctx = acme_ca_context(request)
+            ctx["f"] = {**ctx["f"], **f}
+            return render(request, "acme_ca.html", status=423 if isinstance(e, C.CASealed) else 400, mode=mode, **ctx)
+        flash(request, "ok", "The ACME issuing CA is ready. ACME clients now get their certificates from it.")
+        return go("/acme/ca" + (f"?backup={token}" if token else ""))
+
+    def acme_ca_action(fn):
+        @authed
+        async def wrapper(request):
+            form = await read_form(request)
+            try:
+                flash(request, "ok", await fn(request, form))
+            except C.CAError as e:
+                flash(request, "error", str(e))
+            return go("/acme/ca")
+        return wrapper
+
+    @acme_ca_action
+    async def acme_ca_unlock(request, form):
+        await run_in_threadpool(svc.acme_ca_unlock, "admin", str(form.get("passphrase", "")))
+        return "Unlocked. ACME clients can get certificates again."
+
+    @acme_ca_action
+    async def acme_ca_renew(request, form):
+        key = await upload(form, "root_key")
+        await run_in_threadpool(svc.acme_ca_renew, "admin", str(form.get("passphrase", "")), intval(form, "years", 5, "The lifetime"), key)
+        return "The ACME issuing CA has been renewed. Certificates it already issued keep working."
+
+    @acme_ca_action
+    async def acme_ca_retire(request, form):
+        if str(form.get("confirm", "")).strip() != "retire acme ca":
+            raise C.CAError("Type retire acme ca exactly to confirm.")
+        where = await run_in_threadpool(svc.acme_ca_retire, "admin")
+        return (f"The ACME issuing CA has been put aside (its files are in acme-ca-retired/{where}) and ACME is turned off. "
+                "Turn ACME on again to use your main CA, or create a new ACME issuing CA.")
+
+    @acme_ca_action
+    async def acme_ca_root_remove(request, form):
+        if str(form.get("confirm", "")).strip() != "remove acme root key":
+            raise C.CAError("Type remove acme root key exactly to confirm.")
+        await run_in_threadpool(svc.acme_ca_remove_root_key, "admin")
+        return "The ACME root key has been removed from this server. Keep your backup safe."
+
+    @authed
+    async def acme_ca_root_export(request):
+        form = await read_form(request)
+        try:
+            blob, name = await run_in_threadpool(svc.acme_ca_export_root_key, "admin", str(form.get("passphrase", "")))
+        except C.CAError as e:
+            flash(request, "error", str(e))
+            return go("/acme/ca")
+        return download(blob, name, "application/x-pem-file")
+
+    @authed
+    async def acme_ca_root_download(request):
+        hit = svc.acme_ca_root_download(sid(request), request.path_params["token"])
+        if not hit:
+            flash(request, "error", "That download has expired or was already used. The key isn't kept on the server, "
+                                    "so if you missed it, retire this ACME CA and make a new one.")
+            return go("/acme/ca")
+        return download(hit[0], hit[1], "application/x-pem-file")
+
     # ---- errors -------------------------------------------------------------------------
     async def http_error(request, exc: HTTPException):
         return render(request, "error.html", status=exc.status_code, code=exc.status_code, message=exc.detail)
@@ -603,6 +702,14 @@ def create_app(svc: Service) -> Starlette:
         Route("/acme/eab", acme_eab_new, methods=["POST"]),
         Route("/acme/eab/{kid}/revoke", acme_eab_revoke, methods=["POST"]),
         Route("/acme/accounts/{id}/deactivate", acme_deactivate, methods=["POST"]),
+        Route("/acme/ca", acme_ca_page),
+        Route("/acme/ca/create", acme_ca_create, methods=["POST"]),
+        Route("/acme/ca/unlock", acme_ca_unlock, methods=["POST"]),
+        Route("/acme/ca/renew", acme_ca_renew, methods=["POST"]),
+        Route("/acme/ca/retire", acme_ca_retire, methods=["POST"]),
+        Route("/acme/ca/root-key/export", acme_ca_root_export, methods=["POST"]),
+        Route("/acme/ca/root-key/remove", acme_ca_root_remove, methods=["POST"]),
+        Route("/acme/ca/root-key/download/{token}", acme_ca_root_download),
         *acme_mod.routes(svc),
         Mount("/static", StaticFiles(directory=str(HERE / "static")), name="static"),
     ]

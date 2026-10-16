@@ -34,7 +34,7 @@
           <a href="/issue"{% if path.startswith('/issue') %} aria-current="page"{% endif %}>New certificate</a>
           <a href="/certs"{% if path.startswith('/certs') %} aria-current="page"{% endif %}>Certificates</a>
           <a href="/trust"{% if path == '/trust' %} aria-current="page"{% endif %}>Trust page</a>
-          <a href="/acme"{% if path == '/acme' %} aria-current="page"{% endif %}>ACME</a>
+          <a href="/acme"{% if path == '/acme' or path.startswith('/acme/ca') %} aria-current="page"{% endif %}>ACME</a>
           <a href="/ca"{% if path.startswith('/ca') %} aria-current="page"{% endif %}>CA</a>
           <form method="post" action="/logout">
             <input type="hidden" name="csrf_token" value="{{ csrf }}">

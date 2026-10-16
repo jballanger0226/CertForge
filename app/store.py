@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS certs(
     sha256        TEXT NOT NULL,
     pem           TEXT NOT NULL,
     revoked_at    TEXT,
-    revoke_reason TEXT
+    revoke_reason TEXT,
+    issuer        TEXT NOT NULL DEFAULT 'main'
 );
 CREATE INDEX IF NOT EXISTS certs_issued ON certs(issued_at);
 CREATE TABLE IF NOT EXISTS acme_accounts(
@@ -93,6 +94,8 @@ class Store:
         self.path = str(path)
         with self._conn() as c:
             c.executescript(_SCHEMA)
+            if "issuer" not in {r["name"] for r in c.execute("PRAGMA table_info(certs)")}:    # databases from before the ACME CA
+                c.execute("ALTER TABLE certs ADD COLUMN issuer TEXT NOT NULL DEFAULT 'main'")
 
     def _conn(self) -> sqlite3.Connection:
         c = sqlite3.connect(self.path, timeout=15, isolation_level=None)
@@ -168,8 +171,8 @@ class Store:
         return self._x("UPDATE certs SET revoked_at=?, revoke_reason=? WHERE serial=? AND revoked_at IS NULL",
                        (iso(utcnow()), reason, serial.upper())) == 1
 
-    def revoked(self) -> list[tuple[int, datetime, str]]:
-        rows = self._q("SELECT serial, revoked_at, revoke_reason FROM certs WHERE revoked_at IS NOT NULL")
+    def revoked(self, issuer: str = "main") -> list[tuple[int, datetime, str]]:
+        rows = self._q("SELECT serial, revoked_at, revoke_reason FROM certs WHERE revoked_at IS NOT NULL AND issuer=?", (issuer,))
         return [(int(r["serial"], 16), parse_iso(r["revoked_at"]), r["revoke_reason"] or "unspecified") for r in rows]
 
     # ---- audit ----------------------------------------------------------

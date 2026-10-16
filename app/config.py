@@ -24,6 +24,21 @@ class AutoSetup:
 
 
 @dataclass(frozen=True)
+class AutoAcmeCa:
+    """Creates the ACME issuing CA at start-up, with nobody at the keyboard (README, "A separate CA for ACME")."""
+    mode: str                  # "under-main" (signed by the existing root) or "own-root"
+    passphrase: str            # encrypts the issuing key; also unlocks it at every start
+    main_passphrase: str = ""  # under-main only: the main CA passphrase, to sign with the root
+    root_passphrase: str = ""  # own-root only: encrypts the new root's key, which is then kept on the server
+    hold: str = "secret"
+    key_type: str = "ec-p384"
+    years: int = 5
+    root_years: int = 20
+    permitted: str = ""
+    org: str = ""              # own-root only; blank: the main CA's name
+
+
+@dataclass(frozen=True)
 class Config:
     data: Path            # everything persistent lives here (mount it as a volume)
     bind: str             # address to listen on
@@ -32,6 +47,8 @@ class Config:
     hostnames: str        # initial names for the web UI's certificate (comma separated)
     setup_token: str | None
     auto: AutoSetup | None = None
+    acme_ca_passphrase: str = ""          # unlocks the ACME issuing key at start (when it is set to unlock that way)
+    acme_ca_auto: AutoAcmeCa | None = None
 
     @classmethod
     def from_env(cls, env=os.environ) -> "Config":
@@ -68,6 +85,26 @@ class Config:
                 acme_days=num("CERTFORGE_ACME_DAYS", 90),
                 acme_eab=env.get("CERTFORGE_ACME_EAB", "").strip().lower() in ("1", "true", "yes", "on"))
 
+        acme_pw = secret("CERTFORGE_ACME_CA_PASSPHRASE")
+        acme_auto = None
+        wanted = env.get("CERTFORGE_ACME_CA", "").strip().lower()
+        if wanted not in ("", "0", "off", "no", "false"):
+            if wanted in ("1", "on", "yes", "true", "intermediate", "under-main"):
+                mode = "under-main"
+            elif wanted in ("root", "own-root", "own"):
+                mode = "own-root"
+            else:
+                raise SystemExit("CERTFORGE_ACME_CA must be 'intermediate' (signed by your existing root) or 'root' (its own root).")
+            hold = env.get("CERTFORGE_ACME_CA_HOLD", "secret").strip().lower() or "secret"
+            if hold not in ("secret", "manual"):
+                raise SystemExit("CERTFORGE_ACME_CA_HOLD must be 'secret' or 'manual'.")
+            root_pw = secret("CERTFORGE_ACME_ROOT_PASSPHRASE")      # whether the right ones are there is checked when it's created
+            acme_auto = AutoAcmeCa(
+                mode=mode, passphrase=acme_pw, main_passphrase=passphrase, root_passphrase=root_pw, hold=hold,
+                key_type=env.get("CERTFORGE_ACME_CA_KEY_TYPE", "ec-p384").strip() or "ec-p384",
+                years=num("CERTFORGE_ACME_CA_YEARS", 5), root_years=num("CERTFORGE_ACME_ROOT_YEARS", 20),
+                permitted=env.get("CERTFORGE_ACME_CA_PERMITTED", "").strip(), org=env.get("CERTFORGE_ACME_CA_ORG", "").strip())
+
         return cls(
             data=Path(env.get("CERTFORGE_DATA", "/data")),
             bind=env.get("CERTFORGE_BIND", "0.0.0.0"),
@@ -75,5 +112,5 @@ class Config:
             http_port=num("CERTFORGE_HTTP_PORT", 80),
             hostnames=env.get("CERTFORGE_HOSTNAMES", "").strip(),
             setup_token=env.get("CERTFORGE_SETUP_TOKEN") or None,
-            auto=auto,
+            auto=auto, acme_ca_passphrase=acme_pw, acme_ca_auto=acme_auto,
         )

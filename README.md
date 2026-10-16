@@ -9,7 +9,7 @@ A small private certificate authority with a web page on port 443. Type a name, 
   - **Make one for me**: you give names or IP addresses, you get a `.p12` (key + cert + chain, with a password) or a PEM `.zip` for nginx, Apache and the like.
   - **Sign my request**: paste or upload a CSR, you get a `.cer`, `.der`, full-chain `.pem` or `.p7b`.
 - A public **Trust page** (`/trust`) hands out the root and intermediate certificates and shows how to trust them on Windows, macOS, iOS (profile), Android, Linux and Firefox.
-- An **ACME server** (the protocol behind Let's Encrypt), so certbot, acme.sh, lego, Caddy, Traefik and Proxmox can get and renew their own certificates.
+- An **ACME server** (the protocol behind Let's Encrypt), so certbot, acme.sh, lego, Caddy, Traefik and Proxmox can get and renew their own certificates, optionally signed by an **ACME issuing CA** of its own so the main CA's key can stay locked away.
 - Revocation with a CRL, certificates are listed with expiry warnings, and the web page's own certificate renews itself.
 
 ## Run it with Docker
@@ -67,6 +67,10 @@ CERTFORGE_DATA=./data sudo -E python -m app.server     # or give python CAP_NET_
 | `CERTFORGE_PUBLIC_HOST` | detected | Zero-touch setup: address written into certificates for CA downloads and revocation checks |
 | `CERTFORGE_ACME_DOMAINS`, `CERTFORGE_ACME_NETWORKS` | | Zero-touch setup: turn the ACME server on for these domains and IP ranges |
 | `CERTFORGE_ACME_DAYS`, `CERTFORGE_ACME_EAB` | `90`, `false` | Zero-touch setup: ACME certificate lifetime; require an account key |
+| `CERTFORGE_ACME_CA` | off | `intermediate` (signed by your existing root) or `root` (its own root): create the ACME issuing CA at start. See [A separate CA for ACME](#a-separate-ca-for-acme) |
+| `CERTFORGE_ACME_CA_PASSPHRASE` / `_FILE` | | Encrypts the ACME issuing key, and **unlocks it at every start** (12+ characters, not your CA passphrase) |
+| `CERTFORGE_ACME_ROOT_PASSPHRASE` / `_FILE` | | With `CERTFORGE_ACME_CA=root`: encrypts the new root's key |
+| `CERTFORGE_ACME_CA_HOLD`, `_YEARS`, `_PERMITTED`, `_KEY_TYPE`, `_ORG`, `CERTFORGE_ACME_ROOT_YEARS` | `secret`, 5, main CA's limits, `ec-p384`, main CA's name, 20 | Options for the above. `HOLD=manual` leaves the key locked until you unlock it on the page |
 | `CERTFORGE_KEY_TYPE`, `CERTFORGE_ROOT_YEARS`, `CERTFORGE_INT_YEARS`, `CERTFORGE_PERMITTED` | `ec-p384`, 20, 10, none | Zero-touch setup: same as the wizard's Advanced section |
 
 ## What CertForge works out for itself
@@ -101,21 +105,45 @@ Turn it on from the **ACME** page (or `CERTFORGE_ACME_DOMAINS` for zero-touch se
 - **Who can get what:** only names inside the domains and IP ranges you list, on top of any name limits on the CA itself. A client proves it controls a name by serving a token on port 80 of that name, so anyone who controls an allowed host can get a certificate for it. Turn on **account keys** to also restrict who may register: each key is created on the page, shown once, and works once.
 - **Safe validation:** CertForge only fetches `http://<name>/.well-known/acme-challenge/<token>` on port 80, never follows redirects, caps the response size, and refuses to connect to loopback, link-local (including cloud metadata addresses), multicast or other unusable addresses. Rate limits apply to registrations and orders.
 - **Clients must trust your root CA** first, because the directory is served over HTTPS. The root is on the trust page.
-- **The CA must be unlocked:** with "ask for the passphrase after every restart", issuing and revoking over ACME waits until someone unlocks it.
+- **Which CA signs:** by default your main intermediate, which then has to be unlocked whenever a client renews. Give ACME its own issuing CA (next section) and the main CA doesn't have to be.
 - Clients can revoke their own certificates over ACME, and the revocation list is updated at once.
+
+## A separate CA for ACME
+
+ACME clients renew by themselves, at any hour, so the key that signs for them must be usable without anyone typing a passphrase. Using your main intermediate for that means leaving it unlocked all the time. The **ACME** page's *ACME issuing CA* gives ACME a signing key of its own instead. The main CA can then stay locked, and a leaked ACME key is limited to ACME certificates, within the names it is limited to.
+
+There are two shapes, both with their own key, name limits and revocation list (`/pki/acme-intermediate.crl`):
+
+| | Signed by your existing root (recommended) | Its own root (advanced) |
+|---|---|---|
+| What it is | A second intermediate under the root you already have | A new root and an issuing CA under it, unrelated to your main CA |
+| Clients and devices | Already trust it: nothing new to install | Must install the new ACME root too (it has its own downloads, and its own section on the trust page) |
+| To create | Your CA passphrase once, to sign with the root (plus the root key backup if you removed it from the server) | A root passphrase of your choice |
+| Root key | Stays wherever it is now | Shown to you **once** as an encrypted download and, unless you tick "keep it", **not stored on the server**. You need that backup to renew the issuing CA later |
+| Use when | You want ACME's key kept away from your main CA | ACME should be fully separate: its own name, lifetime or key type, or a different owner |
+
+**How the issuing key is unlocked** is your choice when you create it:
+
+- **From a secret you give the server (default).** The key is always stored encrypted. At every start CertForge reads `CERTFORGE_ACME_CA_PASSPHRASE` (or `_FILE`, for a Docker secret or `systemd` credential) and unlocks it, so ACME survives reboots with nobody there. The data folder and its backups don't contain a usable key. If the secret is missing or wrong, the key simply stays locked and the page tells you.
+- **By hand.** Safer, but ACME stops after every restart until you sign in and enter the passphrase.
+
+It is limited to the names you give it (blank means the same limits as your main CA), and refuses anything outside them whatever the ACME settings say. Those limits are written into its certificate, so the ACME page and dashboard warn you when the settings allow something the CA would refuse; widening them means retiring the CA and making a new one. **Renew** re-signs the same key for a new period, so certificates it already issued keep working. **Retire** moves the CA, keys included, aside (into `acme-ca-retired/` in the data folder) and turns ACME off, so nothing quietly falls back to a different CA. It can no longer update that CA's revocation list, so certificates it issued can't be revoked from here afterwards.
+
+For zero-touch setups set `CERTFORGE_ACME_CA=intermediate` (or `root`) and `CERTFORGE_ACME_CA_PASSPHRASE`. Creating it also needs `CERTFORGE_CA_PASSPHRASE` the first time (`root` needs `CERTFORGE_ACME_ROOT_PASSPHRASE` instead, and then keeps the root key on the server, because nobody is there to download it: back it up and remove it from the page). Once it exists, only the ACME passphrase is needed, to unlock it.
 
 ## How your keys are protected
 
 - CA private keys are stored encrypted (PKCS#8, AES-256, PBKDF2 with 600,000 rounds) under the **CA passphrase** you choose at setup. The passphrase is never stored.
 - **Root key custody.** The root is only needed to renew the intermediate. After setup, use the CA page to download an encrypted backup of the root key, then remove it from the server. Store the backup offline.
 - **Locked mode.** Tick "Ask for the passphrase after every restart" at setup and the intermediate key can't be read until you enter the passphrase after each restart. Otherwise the CA starts on its own, which is easier but means the passphrase protects only the files at rest.
+- The **ACME issuing key** is stored encrypted too, and kept apart from the main CA's keys (see above). A separate ACME root's key isn't stored at all unless you ask.
 - Private keys for certificates made by "Make one for me" are **never written to disk**. They live in memory for 15 minutes so you can download them, then they're gone.
 - The intermediate can be limited to certain domains or networks (name constraints), so a leaked intermediate can't be used to impersonate the whole internet.
 - Sign-in: scrypt-hashed password, strict cookies, CSRF checks, login throttling, a strict Content-Security-Policy.
 
 ## Backups
 
-Back up the whole `CERTFORGE_DATA` folder (the `certforge-data` volume in Docker) and keep the CA passphrase separately. Without both, the CA can't be restored.
+Back up the whole `CERTFORGE_DATA` folder (the `certforge-data` volume in Docker) and keep the CA passphrase separately. Without both, the CA can't be restored. If you gave ACME its own issuing CA, keep its passphrase too (the folder `acme-ca/` is part of the data folder), and with a separate root, keep the root key download.
 
 ## Good to know
 

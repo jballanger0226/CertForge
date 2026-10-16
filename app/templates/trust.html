@@ -19,6 +19,19 @@
   </ul>
 </section>
 
+{% if acme_ca and acme_ca.mode == 'own-root' %}
+<section>
+  <h2>For machines that use ACME</h2>
+  <p>Certificates that ACME clients fetch are signed under a separate root, <strong>{{ acme_ca.root.subject }}</strong>. A device that should trust those needs this one as well.</p>
+  <ul class="links">
+    <li><a href="/pki/acme-root.crt">ACME root certificate (.crt)</a> <span class="small">install it the same way as above</span></li>
+    <li><a href="/pki/acme-root.cer">Binary (.cer)</a> <span class="small">Windows and Java</span></li>
+    <li><a href="/pki/acme-root.mobileconfig">Apple profile (.mobileconfig)</a></li>
+  </ul>
+  <p class="hex small">SHA-256: {{ acme_ca.root.sha256 }}</p>
+</section>
+{% endif %}
+
 <section>
   <h2>Check the fingerprint</h2>
   <p>Before you install it, compare this fingerprint with the one your administrator gave you. If they differ, don't install the certificate.</p>

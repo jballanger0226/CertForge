@@ -52,6 +52,9 @@ cat > "$ROOT/etc/certforge.env" <<'ENV'
 # CERTFORGE_CA_PASSPHRASE=
 # ACME server for certbot, Caddy, Proxmox and so on, turned on at setup for these domains:
 # CERTFORGE_ACME_DOMAINS=lab.example.com
+# A separate signing CA for ACME, so the main CA can stay locked. The passphrase unlocks it at every start:
+# CERTFORGE_ACME_CA=intermediate
+# CERTFORGE_ACME_CA_PASSPHRASE=
 ENV
 chmod 600 "$ROOT/etc/certforge.env"
 echo certforge > "$ROOT/etc/hostname"

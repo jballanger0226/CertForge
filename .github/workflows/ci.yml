@@ -94,12 +94,21 @@ jobs:
         run: docker logs certforge
 
   acme-clients:
-    name: ACME with certbot and lego
+    # main = ACME signed by the main intermediate (the default); intermediate = a dedicated ACME issuing CA under
+    # the same root; root = a dedicated ACME CA with a root of its own
+    name: ACME with certbot and lego (${{ matrix.ca }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        ca: [main, intermediate, root]
     env:
       ADMIN_PW: ci-admin-password-123
       CA_PASS: ci-ca-passphrase-456
+      ACME_CA: ${{ matrix.ca }}
+      ACME_CA_PASS: ci-acme-issuing-passphrase-789
+      ACME_ROOT_PASS: ci-acme-root-passphrase-012
     steps:
       - uses: actions/checkout@v4
       - name: Build the image
@@ -113,12 +122,27 @@ jobs:
           echo "$IP app.certforge.test" | sudo tee -a /etc/hosts
       - name: Start CertForge, set up from its environment (zero-touch) with ACME on
         run: |
+          EXTRA=()
+          if [ "$ACME_CA" != main ]; then
+            EXTRA+=(-e CERTFORGE_ACME_CA="$ACME_CA" -e CERTFORGE_ACME_CA_PASSPHRASE="$ACME_CA_PASS" -e CERTFORGE_ACME_CA_PERMITTED=certforge.test)
+          fi
+          [ "$ACME_CA" = root ] && EXTRA+=(-e CERTFORGE_ACME_ROOT_PASSPHRASE="$ACME_ROOT_PASS")
           docker run -d --name cf --add-host "app.certforge.test:$IP" -p 443:443 -p 8080:80 \
             -e CERTFORGE_HOSTNAMES=certforge.test -e CERTFORGE_ORG="CI Lab" \
             -e CERTFORGE_ADMIN_PASSWORD="$ADMIN_PW" -e CERTFORGE_CA_PASSPHRASE="$CA_PASS" \
-            -e CERTFORGE_ACME_DOMAINS=certforge.test certforge:ci
+            -e CERTFORGE_ACME_DOMAINS=certforge.test "${EXTRA[@]}" certforge:ci
           for i in $(seq 1 40); do curl -fsS http://127.0.0.1:8080/pki/root.crt -o root.crt && break; sleep 2; done
           test -s root.crt
+          # The API is served with the main CA's certificate, so clients always trust root.crt for that. The certificates
+          # they are given chain to the ACME root, which is a different file when ACME has a root of its own.
+          if [ "$ACME_CA" = root ]; then
+            curl -fsS http://127.0.0.1:8080/pki/acme-root.crt -o issuing-root.crt
+            echo "CRL=acme-intermediate.crl" >> "$GITHUB_ENV"
+          else
+            cp root.crt issuing-root.crt
+            if [ "$ACME_CA" = main ]; then echo "CRL=intermediate.crl" >> "$GITHUB_ENV"; else echo "CRL=acme-intermediate.crl" >> "$GITHUB_ENV"; fi
+          fi
+          ! cmp -s root.crt issuing-root.crt || [ "$ACME_CA" != root ]
           curl -fsS --cacert root.crt https://certforge.test/healthz
           curl -fsS --cacert root.crt https://certforge.test/acme/directory | tee /tmp/diag/directory.json
       - name: certbot gets a certificate (HTTP-01 on port 80)
@@ -128,20 +152,24 @@ jobs:
             --register-unsafely-without-email --no-eff-email --server https://certforge.test/acme/directory \
             -d app.certforge.test 2>&1 | tee /tmp/diag/certbot.txt
           L=/etc/letsencrypt/live/app.certforge.test
-          sudo openssl verify -CAfile root.crt -untrusted $L/chain.pem -purpose sslserver -verify_hostname app.certforge.test $L/cert.pem
+          sudo openssl verify -CAfile issuing-root.crt -untrusted $L/chain.pem -purpose sslserver -verify_hostname app.certforge.test $L/cert.pem
           sudo openssl x509 -in $L/cert.pem -noout -serial | tee first-serial
+          # who signed it: the dedicated ACME CA, or (main) the ordinary intermediate
+          ISSUER=$(sudo openssl x509 -in $L/cert.pem -noout -issuer | tee /tmp/diag/issuer.txt)
+          if [ "$ACME_CA" = main ]; then ! grep -q "ACME Issuing CA" <<<"$ISSUER"; else grep -q "ACME Issuing CA" <<<"$ISSUER"; fi
+          if [ "$ACME_CA" = root ]; then ! sudo openssl verify -CAfile root.crt -untrusted $L/chain.pem $L/cert.pem >/dev/null 2>&1; fi
       - name: certbot renews (new certificate, still valid)
         run: |
           sudo env REQUESTS_CA_BUNDLE="$PWD/root.crt" certbot renew --force-renewal --cert-name app.certforge.test 2>&1 | tee /tmp/diag/certbot-renew.txt
           L=/etc/letsencrypt/live/app.certforge.test
-          sudo openssl verify -CAfile root.crt -untrusted $L/chain.pem -purpose sslserver -verify_hostname app.certforge.test $L/cert.pem
+          sudo openssl verify -CAfile issuing-root.crt -untrusted $L/chain.pem -purpose sslserver -verify_hostname app.certforge.test $L/cert.pem
           sudo openssl x509 -in $L/cert.pem -noout -serial > second-serial
           ! diff -q first-serial second-serial
       - name: certbot revokes it, and the CRL lists it
         run: |
           sudo env REQUESTS_CA_BUNDLE="$PWD/root.crt" certbot revoke --non-interactive --cert-name app.certforge.test \
             --server https://certforge.test/acme/directory --reason keycompromise 2>&1 | tee /tmp/diag/certbot-revoke.txt
-          curl -fsS http://127.0.0.1:8080/pki/intermediate.crl | openssl crl -inform DER -noout -text | tee /tmp/diag/crl.txt
+          curl -fsS "http://127.0.0.1:8080/pki/$CRL" | openssl crl -inform DER -noout -text | tee /tmp/diag/crl.txt
           grep -q "Serial Number" /tmp/diag/crl.txt
       - name: lego gets a certificate
         run: |
@@ -150,7 +178,7 @@ jobs:
             --server https://certforge.test/acme/directory --accept-tos --email ci@certforge.test \
             --http --http.port :80 --path /data/lego -d app.certforge.test run 2>&1 | tee /tmp/diag/lego.txt
           sudo chown -R "$USER" lego
-          openssl verify -CAfile root.crt -untrusted lego/certificates/app.certforge.test.crt -purpose sslserver \
+          openssl verify -CAfile issuing-root.crt -untrusted lego/certificates/app.certforge.test.crt -purpose sslserver \
             -verify_hostname app.certforge.test lego/certificates/app.certforge.test.crt
       - name: Diagnostics (shown as an annotation, since job logs may be unavailable)
         if: failure()
