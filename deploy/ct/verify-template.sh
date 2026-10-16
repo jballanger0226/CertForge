@@ -17,7 +17,7 @@ R="$W/rootfs"
 
 # Also written as a GitHub annotation, so the reason shows on the run page without opening the log.
 fail() { echo "FAIL: $*" >&2; echo "::error title=Template check failed::${*//$'\n'/%0A}"; exit 1; }
-tail_log() { tail -n 40 "$1" | sed 's/\r//' | awk 'BEGIN{ORS="%0A"}{print}'; }
+tail_log() { tail -n 40 "$1" | sed 's/\r//; s/\x1b\[[0-9;]*m//g' | tr '\n' '|'; }
 grep -q '^ID=debian' "$R/etc/os-release"          || fail "no Debian /etc/os-release"
 [ -x "$R/sbin/init" ] || [ -x "$R/usr/lib/systemd/systemd" ] || fail "no init"
 [ -x "$R/opt/certforge/venv/bin/python" ]          || fail "venv missing"
@@ -31,6 +31,9 @@ uid=$(awk -F: '$1=="certforge"{print $3}' "$R/etc/passwd")      # host can't map
 echo "structure OK"
 
 # Boot it. nspawn shares the runner's network, so the service answers on the runner's port 443.
+# The container's own network manager is masked for this test: it would try to reconfigure the
+# runner's real interfaces (DHCP is therefore not covered here).
+systemctl --root="$R" mask systemd-networkd.service systemd-networkd.socket systemd-networkd-wait-online.service >/dev/null
 echo "booting..."
 systemd-nspawn -q -D "$R" --boot --register=no --machine=certforge-verify >"$W/boot.log" 2>&1 &
 PID=$!
