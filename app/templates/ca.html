@@ -120,7 +120,7 @@
     <dt>Version</dt><dd>{{ about.version }}{% if not about.released %} <span class="small">(not a tagged release)</span>{% endif %}</dd>
     <dt>Revision</dt><dd class="hex">{{ about.revision or 'unknown' }}</dd>
     {% if about.since %}<dt>Running since</dt><dd>{{ about.since|datetime }}{% if about.previous %}, after {{ about.previous.version }}{% if about.previous.revision %} ({{ about.previous.revision }}){% endif %}{% endif %}</dd>{% endif %}
-    {% if about.last_update %}<dt>Last update</dt><dd>{{ about.last_update.from_version }} to {{ about.last_update.to_version }}, on {{ about.last_update.when|datetime }}{% if about.last_update.backup %}. Your data was backed up first to <span class="hex">{{ about.last_update.backup }}</span>{% endif %}</dd>{% endif %}
+    {% if about.last_update %}<dt>Last update</dt><dd>{{ about.last_update.from_version }} to {{ about.last_update.to_version }}{% if about.last_update.source and about.last_update.source not in ('release', 'file', 'rollback') %} (from {{ about.last_update.source }}){% elif about.last_update.source == 'rollback' %} (rollback){% endif %}, on {{ about.last_update.when|datetime }}{% if about.last_update.backup %}. Your data was backed up first to <span class="hex">{{ about.last_update.backup }}</span>{% endif %}</dd>{% endif %}
   </dl>
   {% set up = about.updates %}
   {% if up.available %}
@@ -134,7 +134,7 @@
   <h3>Updating</h3>
   <p>Updates are installed from the command line of the server, by whoever administers it, and never from this page. That keeps the web login from being able to change the program that holds your CA keys. Run this on the host:</p>
   <div class="cmdrow"><pre class="cmd" id="c-update">{{ about.command }}</pre><button type="button" class="btn quiet small" data-copy="#c-update">Copy</button></div>
-  {% if about.deploy == 'host' %}<p class="small"><code>sudo certforge-update --check</code> only looks. <code>sudo certforge-update --rollback</code> returns to the previous version. Your data is backed up before every update.</p>{% endif %}
+  {% if about.deploy == 'host' %}<p class="small"><code>sudo certforge-update --check</code> only looks. <code>sudo certforge-update main</code> installs a branch or tag from GitHub as an unreleased build (it has no checksum, so it is for testing). <code>sudo certforge-update --rollback</code> returns to the previous version. Your data is backed up before every update.</p>{% endif %}
   <h3>Look for new releases</h3>
   <form method="post" action="/ca/updates" class="narrow">
     <input type="hidden" name="csrf_token" value="{{ csrf }}">

@@ -5,15 +5,25 @@ The web interface can tell you a newer release exists, but it can never install 
 program takes root on the machine, so only someone who can log in to the container or host can do it.
 
     sudo certforge-update                  install the newest release
-    sudo certforge-update --check          say what is available, change nothing
+    sudo certforge-update main             install a branch or tag straight from GitHub (an unreleased build)
+    sudo certforge-update v1.2.0           ... a tag works too
+    sudo certforge-update --check [ref]    say what is available (or where a branch is now), change nothing
     sudo certforge-update --version 1.2.0  install that release (also how you go back)
     sudo certforge-update --file X.tar.gz  install a release tarball you downloaded yourself
     sudo certforge-update --rollback       return to the copy saved by the last update
 
-Steps: download the release tarball and its SHA256SUMS, verify the checksum, unpack it safely, save
-the current program and data to /var/backups/certforge, install, restart the service, wait for the
-health check, and put everything back if the new version does not come up.
-Integrity here is the checksum published with the release over HTTPS from GitHub; releases are not
+A release is downloaded with its SHA256SUMS and verified. A branch or tag is the source tarball GitHub builds
+for that name: it is installed as an unreleased build (version 0.0.0-<commit>) and there is nothing to verify
+it against except GitHub over HTTPS, so it is for testing. Either way the current program and data are saved
+to /var/backups/certforge, the service is restarted, the health check must pass, and everything is put back
+if the new version does not come up.
+
+Settings for this command (not for the web service) go in /etc/certforge-update.env, one KEY=value per line,
+readable by root only:
+    CERTFORGE_REF=main              what a plain `certforge-update` installs (default: the newest release)
+    GITHUB_TOKEN=...                lets it read a private repository (branches and tags only)
+    CERTFORGE_UPDATE_REPO=owner/name
+Integrity of a release is the checksum published with it over HTTPS from GitHub; releases are not
 separately signed.
 """
 from __future__ import annotations
@@ -30,6 +40,7 @@ import tarfile
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,8 +52,50 @@ ALLOWED_TOP = {"app", "requirements.txt", "deploy", "VERSION", "REVISION"}
 _SEMVER = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$")
 
 
+ENV_FILE = "/etc/certforge-update.env"
+_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
+
+
 class Fail(Exception):
     pass
+
+
+class NotFound(Fail):
+    pass
+
+
+def valid_ref(ref: str) -> bool:
+    return bool(_REF.match(ref or "")) and ".." not in ref and "//" not in ref and not ref.endswith(("/", ".lock", "."))
+
+
+def load_env_file(path) -> dict:
+    """KEY=value lines (comments and blank lines allowed). Never executed, never exported to the service."""
+    out = {}
+    try:
+        text = Path(path).read_text()
+    except OSError:
+        return out
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        out[k.strip()] = v.strip().strip("\"'")
+    return out
+
+
+class _KeepTokenOnGitHub(urllib.request.HTTPRedirectHandler):
+    """The token is for api.github.com. GitHub redirects a source download to codeload.github.com;
+    drop the token for any host that isn't GitHub's, and never follow a redirect to plain http."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        host = urllib.parse.urlparse(newurl)
+        if host.scheme != "https":
+            raise urllib.error.HTTPError(newurl, code, "refusing a redirect to a non-https address", headers, fp)
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and not (host.hostname or "").endswith((".github.com", ".githubusercontent.com")) and host.hostname != "github.com":
+            new.headers.pop("Authorization", None)
+            new.unredirected_hdrs.pop("Authorization", None)
+        return new
 
 
 def say(msg: str = "") -> None:
@@ -72,7 +125,8 @@ def read_line(path: Path) -> str:
 class Updater:
     def __init__(self, prefix="/opt/certforge", data="/var/lib/certforge", backups="/var/backups/certforge",
                  service="certforge", repo=REPO, user="certforge", http=None, run=None, health=None, build_venv=None,
-                 is_root=None, now=None):
+                 is_root=None, now=None, token=""):
+        self.token = token
         self.prefix, self.data, self.backups = Path(prefix), Path(data), Path(backups)
         self.service, self.repo, self.user = service, repo, user
         self.http = http or self._http
@@ -83,13 +137,17 @@ class Updater:
         self.now = now or (lambda: datetime.now(timezone.utc))
 
     # ---- the outside world (replaced in tests) -------------------------------------------------------
-    @staticmethod
-    def _http(url: str, limit: int = MAX_DOWNLOAD) -> bytes:
-        req = urllib.request.Request(url, headers={"User-Agent": "certforge-update", "Accept": "application/vnd.github+json, application/octet-stream"})
+    def _http(self, url: str, limit: int = MAX_DOWNLOAD, accept: str = "application/vnd.github+json, application/octet-stream") -> bytes:
+        headers = {"User-Agent": "certforge-update", "Accept": accept}
+        if self.token and urllib.parse.urlparse(url).hostname == "api.github.com":
+            headers["Authorization"] = f"Bearer {self.token}"
+        req = urllib.request.Request(url, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=30) as r:
+            with urllib.request.build_opener(_KeepTokenOnGitHub).open(req, timeout=60) as r:
                 data = r.read(limit + 1)
         except urllib.error.HTTPError as e:
+            if e.code == 404:
+                raise NotFound(f"GitHub says {url} doesn't exist" + ("" if self.token else " (a private repository needs GITHUB_TOKEN)")) from None
             raise Fail(f"GitHub answered {e.code} for {url}") from None
         except OSError as e:
             raise Fail(f"Couldn't reach {url}: {getattr(e, 'reason', None) or e}") from None
@@ -133,6 +191,9 @@ class Updater:
         path = f"tags/v{version.lstrip('v')}" if version else "latest"
         try:
             data = json.loads(self.http(f"https://api.github.com/repos/{self.repo}/releases/{path}", 1_000_000))
+        except NotFound:
+            raise Fail((f"There is no release v{version.lstrip('v')} of {self.repo}." if version else
+                        f"{self.repo} has no published release yet. To install a branch or tag instead: sudo certforge-update main")) from None
         except ValueError:
             raise Fail("GitHub's answer wasn't understood.") from None
         tag = str(data.get("tag_name", ""))
@@ -140,6 +201,19 @@ class Updater:
             raise Fail(f"The release is called '{tag}', which isn't a version number.")
         assets = {a["name"]: a["browser_download_url"] for a in data.get("assets", []) if "name" in a and "browser_download_url" in a}
         return {"version": tag.lstrip("v"), "tag": tag, "assets": assets}
+
+    def resolve(self, ref: str) -> str:
+        """The commit a branch or tag points to now (40 hex characters)."""
+        if not valid_ref(ref):
+            raise Fail(f"'{ref}' isn't a usable branch or tag name.")
+        try:
+            sha = self.http(f"https://api.github.com/repos/{self.repo}/commits/{urllib.parse.quote(ref, safe='/')}", 1000,
+                            "application/vnd.github.sha").decode("ascii", "replace").strip()
+        except NotFound:
+            raise Fail(f"{self.repo} has no branch or tag called '{ref}'.") from None
+        if not re.fullmatch(r"[0-9a-f]{40}", sha):
+            raise Fail("GitHub's answer wasn't a commit id.")
+        return sha
 
     # ---- steps -----------------------------------------------------------------------------------------
     @staticmethod
@@ -149,17 +223,33 @@ class Updater:
             raise Fail(f"The checksum doesn't match (expected {expected[:16]}…, got {got[:16]}…). Nothing was changed.")
 
     @staticmethod
-    def unpack(tarball: Path, dest: Path) -> Path:
-        """Extract only plain files and folders, only under the expected names, never outside dest."""
+    def unpack(tarball: Path, dest: Path, source: bool = False) -> Path:
+        """Extract only plain files and folders, only under the expected names, never outside dest.
+
+        A release holds nothing but the expected items. A GitHub source tarball (source=True) is the whole
+        repository inside one folder; only the parts a running system needs are taken, the rest is skipped."""
         dest.mkdir(parents=True)
         try:
             with tarfile.open(tarball, "r:*") as tf:
                 members = tf.getmembers()
                 wrapper = None                      # one wrapping folder (certforge-1.2.0/) is allowed
+                chosen = []
                 for m in members:
                     parts = Path(m.name).parts
                     if m.name.startswith("/") or ".." in parts or not parts:
                         raise Fail(f"Unsafe path in the archive: {m.name}")
+                    if source:
+                        if wrapper not in (None, parts[0]):
+                            raise Fail("The archive has an unexpected layout.")
+                        wrapper = parts[0]
+                        if len(parts) == 1 and not m.isdir():
+                            raise Fail("The archive has an unexpected layout.")
+                        if len(parts) == 1 or parts[1] not in ALLOWED_TOP:
+                            continue
+                        if not (m.isfile() or m.isdir()):
+                            raise Fail(f"The archive contains something that isn't a plain file or folder: {m.name}")
+                        chosen.append(m)
+                        continue
                     if not (m.isfile() or m.isdir()):
                         raise Fail(f"The archive contains something that isn't a plain file or folder: {m.name}")
                     if parts[0] in ALLOWED_TOP:
@@ -173,18 +263,19 @@ class Updater:
                     if w is None and wrapper is not None:
                         raise Fail("The archive has an unexpected layout.")
                     wrapper = w if w is not None else wrapper
+                    chosen.append(m)
                 root = wrapper
-                for m in members:
+                for m in chosen:
                     m.mode &= 0o755 if m.isdir() else 0o644
                     m.uid = m.gid = 0
                     m.uname = m.gname = ""
-                tf.extractall(dest, members=members, filter="data") if hasattr(tarfile, "data_filter") else tf.extractall(dest, members=members)
+                tf.extractall(dest, members=chosen, filter="data") if hasattr(tarfile, "data_filter") else tf.extractall(dest, members=chosen)
         except (tarfile.TarError, EOFError, OSError) as e:
             raise Fail(f"The archive couldn't be unpacked: {e}") from None
         src = dest / root if root else dest
-        for need in ("app/server.py", "requirements.txt", "VERSION"):
+        for need in ("app/server.py", "requirements.txt") + (() if source else ("VERSION",)):
             if not (src / need).is_file():
-                raise Fail(f"The archive doesn't look like a CertForge release (missing {need}).")
+                raise Fail(f"The archive doesn't look like CertForge (missing {need}).")
         return src
 
     def _service(self, verb: str) -> None:
@@ -254,8 +345,9 @@ class Updater:
                 except OSError:
                     pass
 
-    def _record(self, before: str, after: str, backup: Path) -> None:
-        note = {"from_version": before, "to_version": after, "when": self.now().strftime("%Y-%m-%dT%H:%M:%SZ"), "backup": str(backup)}
+    def _record(self, before: str, after: str, backup: Path, source: str = "release") -> None:
+        note = {"from_version": before, "to_version": after, "when": self.now().strftime("%Y-%m-%dT%H:%M:%SZ"), "backup": str(backup),
+                "source": source}
         tmp = self.data / ".last-update.tmp"
         tmp.write_text(json.dumps(note))
         os.chmod(tmp, 0o600)
@@ -263,21 +355,39 @@ class Updater:
         self._chown(self.data / "last-update.json")
 
     # ---- commands --------------------------------------------------------------------------------------
-    def check(self, version: str | None = None) -> int:
+    def check(self, version: str | None = None, ref: str | None = None) -> int:
         cur, rev = self.installed()
-        rel = self.release(version)
         say(f"Installed: {self.label(cur, rev)}")
+        if ref:
+            sha = self.resolve(ref)
+            say(f"{ref} is at {sha[:7]} on {self.repo}")
+            say("That is the commit you are running." if rev and sha.startswith(rev) else f"That is a different commit; `sudo certforge-update {ref}` would install it.")
+            return 0
+        rel = self.release(version)
         say(f"Latest:    {rel['version']}")
         n = newer(rel["version"], cur)
         say("You are up to date." if n is False and not version else "An update is available." if n else "These can't be compared; use --version to choose.")
         return 0
 
-    def install(self, version: str | None = None, file: Path | None = None, sha256: str | None = None, yes: bool = True) -> int:
+    def install(self, version: str | None = None, file: Path | None = None, sha256: str | None = None, yes: bool = True,
+                ref: str | None = None, force: bool = False) -> int:
         self._need_root()
         cur, rev = self.installed()
         with tempfile.TemporaryDirectory(prefix="certforge-update-") as t:
             work = Path(t)
-            if file:
+            source, sha = "release", ""
+            if ref:
+                sha = self.resolve(ref)
+                source = f"{ref} @ {sha[:7]}"
+                if rev and sha.startswith(rev) and not force:
+                    say(f"CertForge {self.label(cur, rev)} is already {ref} at {sha[:7]}. Nothing to do (add --force to reinstall it).")
+                    return 0
+                say(f"Downloading {ref} ({sha[:7]}) from {self.repo} …")
+                tarball = work / "source.tar.gz"
+                tarball.write_bytes(self.http(f"https://api.github.com/repos/{self.repo}/tarball/{sha}", MAX_DOWNLOAD, "application/vnd.github+json"))
+                target = None
+            elif file:
+                source = "file"
                 tarball = Path(file)
                 if not tarball.is_file():
                     raise Fail(f"{file} doesn't exist.")
@@ -304,7 +414,16 @@ class Updater:
                     raise Fail(f"SHA256SUMS has no entry for {name}.")
                 self.verify(tarball, want)
                 say("Checksum verified.")
-            src = self.unpack(tarball, work / "unpacked")
+            src = self.unpack(tarball, work / "unpacked", source=bool(ref))
+            if ref:
+                # GitHub names the folder owner-repo-<commit>; it must be the commit we asked for.
+                got = src.name.rsplit("-", 1)[-1]
+                if len(got) < 7 or not sha.startswith(got):
+                    raise Fail("The download isn't the commit that was asked for. Nothing was changed.")
+                tag = ref.removeprefix("refs/tags/")
+                (src / "VERSION").write_text((tag.lstrip("v") if parse(tag) else f"0.0.0-{sha[:7]}") + "\n")
+                (src / "REVISION").write_text(sha + "\n")
+                say(f"Note: this is the source of '{ref}', not a release: it isn't checksummed and it may be unfinished.")
             new_version, new_rev = read_line(src / "VERSION"), read_line(src / "REVISION")[:7]
             if target and new_version.lstrip("v") != target:
                 raise Fail(f"The archive says it is {new_version}, not {target}. Nothing was changed.")
@@ -349,7 +468,7 @@ class Updater:
                 raise Fail("Rolled back." if back else "Rollback finished but the service isn't healthy.")
             if venv_old:
                 shutil.rmtree(venv_old, ignore_errors=True)
-            self._record(self.label(cur, rev), self.label(new_version, new_rev), backup)
+            self._record(self.label(cur, rev), self.label(new_version, new_rev), backup, source)
             say(f"Done. CertForge {self.label(new_version, new_rev)} is running.")
             say(f"To go back:  sudo certforge-update --rollback   (backup: {backup})")
         return 0
@@ -368,7 +487,7 @@ class Updater:
         if not self.health():
             raise Fail("The restored version isn't responding; check: journalctl -u certforge")
         now, nrev = self.installed()
-        self._record(self.label(cur, rev), self.label(now, nrev), backup)
+        self._record(self.label(cur, rev), self.label(now, nrev), backup, "rollback")
         say(f"Done. CertForge {self.label(now, nrev)} is running.")
         say("The program was restored but not the data: if the newer version changed the database, the older one may not read it. The backup file holds the data from before the update.")
         return 0
@@ -385,26 +504,57 @@ def read_line_all(path: Path) -> str:
         return ""
 
 
-def main(argv=None, **kw) -> int:
+def trusted_env(path) -> dict:
+    """The settings file is read as root and can name the repository the program is downloaded from, so
+    it is only honoured if nobody but root (or whoever is running this) can have written it."""
+    p = Path(path)
+    try:
+        st = p.stat()
+    except OSError:
+        return {}
+    if st.st_uid not in (0, os.geteuid()) or st.st_mode & 0o022:
+        say(f"Ignoring {p}: it must be owned by root and not writable by anyone else (chmod 600).")
+        return {}
+    if st.st_mode & 0o044:
+        say(f"Note: {p} can be read by other users; if it holds a token run: chmod 600 {p}")
+    return load_env_file(p)
+
+
+def main(argv=None, env_file=ENV_FILE, **kw) -> int:
     ap = argparse.ArgumentParser(prog="certforge-update", description="Update CertForge in place (run as root on the host).")
+    ap.add_argument("ref", nargs="?", help="a branch or tag to install from GitHub (an unreleased build), e.g. main")
     g = ap.add_mutually_exclusive_group()
-    g.add_argument("--check", action="store_true", help="say whether a newer release exists; change nothing")
+    g.add_argument("--check", action="store_true", help="say what is available (or where REF is now); change nothing")
     g.add_argument("--rollback", action="store_true", help="return to the program saved by the last update")
     g.add_argument("--file", metavar="TARBALL", help="install a release tarball you already downloaded")
     ap.add_argument("--version", metavar="X.Y.Z", help="install this release instead of the newest")
+    ap.add_argument("--release", action="store_true", help="install the newest release even if CERTFORGE_REF is set")
+    ap.add_argument("--force", action="store_true", help="reinstall even if this commit is already installed")
     ap.add_argument("--sha256", help="expected SHA-256 of --file")
-    ap.add_argument("--repo", default=os.environ.get("CERTFORGE_UPDATE_REPO", REPO), help=argparse.SUPPRESS)
+    ap.add_argument("--repo", default=None, help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", a.repo):
+    conf = trusted_env(env_file)
+    repo = a.repo or os.environ.get("CERTFORGE_UPDATE_REPO") or conf.get("CERTFORGE_UPDATE_REPO") or REPO
+    token = os.environ.get("GITHUB_TOKEN") or conf.get("GITHUB_TOKEN") or ""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", repo):
         say("That isn't a GitHub repository name like owner/name.")
         return 2
-    u = Updater(repo=a.repo, **kw)
+    ref = a.ref
+    if ref and (a.version or a.file or a.rollback):
+        say("Give either a branch/tag or --version/--file/--rollback, not both.")
+        return 2
+    if not ref and not (a.version or a.file or a.rollback or a.release):
+        ref = conf.get("CERTFORGE_REF") or None            # what a plain `certforge-update` installs on this machine
+    if ref and not valid_ref(ref):
+        say(f"'{ref}' isn't a usable branch or tag name.")
+        return 2
+    u = Updater(repo=repo, token=token, **kw)
     try:
         if a.check:
-            return u.check(a.version)
+            return u.check(a.version, ref)
         if a.rollback:
             return u.rollback()
-        return u.install(version=a.version, file=Path(a.file) if a.file else None, sha256=a.sha256)
+        return u.install(version=a.version, file=Path(a.file) if a.file else None, sha256=a.sha256, ref=ref, force=a.force)
     except Fail as e:
         say(f"certforge-update: {e}")
         return 1

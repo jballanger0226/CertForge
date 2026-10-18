@@ -157,9 +157,30 @@ CertForge shows which version is running in the footer and under **CA > Software
 
 `certforge-update` downloads the newest release from GitHub, checks it against the `SHA256SUMS` published with it, saves the current program and your data to `/var/backups/certforge` (the last three are kept), installs it, restarts the service and waits for the health check. If the new version doesn't come up, it puts the old program and data back. Other options: `--check` (look only), `--version 1.2.0` (a specific release, including an older one), `--file X.tar.gz --sha256 ...` (a download you made yourself, for machines with no internet) and `--rollback` (back to the saved program; data stays as it is now).
 
+**Trying a branch or tag.** Give it a name and it installs that straight from GitHub, the same way [FlowScope](https://github.com/jballanger0226/flowscope)'s `flowscope-ctl update` does:
+
+```
+sudo certforge-update main            # the tip of a branch
+sudo certforge-update v1.2.0          # a tag
+sudo certforge-update --check main    # where is main now? (changes nothing)
+sudo certforge-update main --force    # reinstall even if you already run that commit
+```
+
+The branch is resolved to one commit first and that exact commit is downloaded. The result is shown as an unreleased build, version `0.0.0-<commit>` (a tag like `v1.2.0` keeps its number), and the footer and CA > Software show the commit. The same backup, health check and automatic put-back apply. If you are already on that commit it says so and does nothing.
+
+To make a plain `sudo certforge-update` follow a branch, or to read a private repository, put settings in `/etc/certforge-update.env` (root-owned, mode 600; the web service never reads it):
+
+```
+CERTFORGE_REF=main
+GITHUB_TOKEN=github_pat_...        # read-only access to the repository's contents is enough
+CERTFORGE_UPDATE_REPO=owner/name   # if you run a fork
+```
+
+`sudo certforge-update --release` ignores `CERTFORGE_REF` for one run and installs the newest release. The settings file is ignored if anyone but root could have written it, because it decides where the program is downloaded from. The token is only sent to `api.github.com` and GitHub's own download hosts, never over plain http.
+
 **Look for new releases** is off by default. Turn it on under CA > Software (or set `CERTFORGE_UPDATE_CHECK=1`) and CertForge asks GitHub about once a day whether a newer release exists, then shows a notice with the command to run. It sends only the program name and version; GitHub sees the server's address. It never downloads or installs anything.
 
-Limits worth knowing: the checksum guards against a damaged or swapped download but releases are not signed, so you are trusting the GitHub repository. The updater replaces the program, not `/etc/certforge.env` or the systemd unit; if a release needs a unit change, its notes say so. The Docker image comes from GitHub's container registry once a release exists; until then use `docker compose build` and `up -d`. Releases are made by pushing a `v1.2.3` tag, which builds the tarball, the image and the Proxmox template.
+Limits worth knowing: the checksum guards against a damaged or swapped download but releases are not signed, so you are trusting the GitHub repository. A branch or tag has no checksum to compare against at all (GitHub over HTTPS is the only check), so use those for testing rather than for a CA you depend on. The updater replaces the program, not `/etc/certforge.env` or the systemd unit; if a release needs a unit change, its notes say so. The Docker image comes from GitHub's container registry once a release exists; until then use `docker compose build` and `up -d`. Releases are made by pushing a `v1.2.3` tag, which builds the tarball, the image and the Proxmox template.
 
 ## How your keys are protected
 
